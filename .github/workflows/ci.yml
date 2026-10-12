@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        san: ["", thread, address]
+    name: build+test ${{ matrix.san || 'plain' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/setup.sh
+      # TSan crashes on 24.04's high-entropy ASLR; lower it for the run.
+      - if: matrix.san == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: make SAN=${{ matrix.san }}
+      - run: make SAN=${{ matrix.san }} test
