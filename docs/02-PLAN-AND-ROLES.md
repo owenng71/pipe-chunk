@@ -38,15 +38,14 @@ plus measuring it. Each person can work in parallel once the interfaces in Overv
 
 ### Branch → PR → merge
 1. Take an issue, assign yourself, move to *In Progress*.
-2. Branch off `main`: `feature/<id>-short-name` (e.g. `feature/w1-08-queue`), or `fix/...` for bugs.
+2. Branch: `feat/<id>-short-name` (e.g. `feat/w1-08-queue`), or `fix/...` for bugs.
 3. Small commits, imperative messages: `Add close() to bounded queue`.
 4. Open a PR with `Closes #<issue>` in the description.
-5. **Merge rules on `main`** (enforced by GitHub branch protection): no direct pushes · PR required ·
-   approval from Phat (`.github/CODEOWNERS`) · CI green · all review comments resolved.
-6. Phat squash-merges; GitHub deletes the branch automatically.
+5. **Merge rules on `main`** (team rule, not enforced by GitHub): PR required · 1 approval · CI green · no direct pushes.
+6. Squash-merge, delete the branch.
 
-**Review:** Phat reviews and merges every PR. Vy and Son are encouraged to review each other's PRs
-too (extra eyes), and review Phat's PRs before he merges them.
+**Reviewer rotation:** Vy's PRs → Son reviews · Son's PRs → Vy reviews · Phat's PRs → either. Phat
+also skims every PR touching `pipeline.c` or `tests/`.
 
 ### Definition of Done (for every task)
 - [ ] Code merged to `main`, CI green (build + unit tests + TSan + ASan)
@@ -75,7 +74,7 @@ too (extra eyes), and review Phat's PRs before he merges them.
 
 | ID | Task | Owner | Due | Depends on | Problem it solves |
 |---|---|---|---|---|---|
-| W1-01 | Repo, board, labels, milestones, branch protection | Phat | Mon | — | Team needs one place to track work and a protected `main` |
+| W1-01 | Repo, board, labels, milestones | Phat | Mon | — | Team needs one place to track work |
 | W1-02 | Skeleton: folder layout, `Makefile`, header files with the agreed interfaces (stubs that compile) | Phat | Tue | W1-01, W1-03 | Lets Vy & Son code in parallel against fixed contracts |
 | W1-03 | **Design review (at the Monday meeting):** record struct, ownership table, sync table, interfaces (Overview §5, §10) | All | Mon | — | Everyone agrees *who owns which buffer when* before writing code |
 | W1-04 | `scripts/setup.sh` + README v1 (install deps, build, run) | Phat | Wed | W1-02 | Clean-machine reproduction (acceptance gate #1) |

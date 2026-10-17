@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # github_bootstrap.sh OWNER/REPO — one-time GitHub setup for the plan in docs/02-PLAN-AND-ROLES.md:
-#   labels, 3 sprint milestones, one issue per task, a "pipe-chunk" project board, branch protection on main.
+#   labels, 3 sprint milestones, one issue per task and a "pipe-chunk" project board.
 # Safe to re-run: anything that already exists is skipped.
 # Needs the GitHub CLI: https://cli.github.com, then `gh auth login` and `gh auth refresh -s project`.
 set -euo pipefail
@@ -66,7 +66,7 @@ Details: [plan](https://github.com/$repo/blob/main/docs/02-PLAN-AND-ROLES.md) ·
     fi
     gh project item-add "$proj" --owner "$owner" --url "$url" >/dev/null
 done <<'EOF'
-W1-01|1|ci|Repo, board, labels, milestones, branch protection|Phat|Mon|—|Team needs one place to track work and a protected main
+W1-01|1|ci|Repo, board, labels, milestones|Phat|Mon|—|Team needs one place to track work
 W1-02|1|core|Skeleton: folder layout, Makefile, headers with agreed interfaces|Phat|Tue|W1-01, W1-03|Lets Vy & Son code in parallel against fixed contracts
 W1-03|1|docs|Design review: record struct, ownership table, sync table, interfaces|All|Mon|—|Everyone agrees who owns which buffer when before writing code
 W1-04|1|ci,docs|setup.sh + README v1|Phat|Wed|W1-02|Clean-machine reproduction (acceptance gate #1)
@@ -97,27 +97,6 @@ W3-06|3|docs|Analysis: explain each graph and the throughput/latency trade-off|A
 W3-07|3|docs|Report: own module + results; intro/design/conclusion split|All|Fri|W3-06|Final deliverable
 W3-08|3|docs|Knowledge-share: each person explains the other two modules + 5 core concepts|All|Sat|—|Acceptance gate #4
 W3-09|3|docs|Slides + demo script (backpressure, --fail-worker, Ctrl+C) + rehearsal|All|Sun|W3-07|Presentation
-EOF
-
-echo "== merge settings: squash only, delete branch after merge"
-gh api -X PATCH "repos/$repo" -F allow_squash_merge=true -F allow_merge_commit=false \
-    -F allow_rebase_merge=false -F delete_branch_on_merge=true >/dev/null
-
-# No direct pushes to main; every change goes through a PR approved by a code owner (.github/CODEOWNERS)
-# with green CI. enforce_admins=false lets the repo owner merge their own PRs (GitHub forbids self-approval).
-echo "== branch protection on main (private repo needs GitHub Pro / Student Pack)"
-gh api -X PUT "repos/$repo/branches/main/protection" --input - >/dev/null <<'EOF' && echo ok || echo "FAILED: private repos need GitHub Pro (free with the GitHub Student Developer Pack) or a public repo"
-{
-  "required_status_checks": { "strict": true,
-    "contexts": ["build+test plain", "build+test thread", "build+test address"] },
-  "enforce_admins": false,
-  "required_pull_request_reviews": { "required_approving_review_count": 1,
-    "require_code_owner_reviews": true, "dismiss_stale_reviews": true },
-  "required_conversation_resolution": true,
-  "allow_force_pushes": false,
-  "allow_deletions": false,
-  "restrictions": null
-}
 EOF
 
 echo "done: https://github.com/$repo/issues · board: gh project view $proj --owner $owner --web"
