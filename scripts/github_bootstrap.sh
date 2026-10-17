@@ -99,13 +99,23 @@ W3-08|3|docs|Knowledge-share: each person explains the other two modules + 5 cor
 W3-09|3|docs|Slides + demo script (backpressure, --fail-worker, Ctrl+C) + rehearsal|All|Sun|W3-07|Presentation
 EOF
 
-echo "== branch protection on main (needs main pushed; private repos need a paid plan)"
-gh api -X PUT "repos/$repo/branches/main/protection" --input - >/dev/null <<'EOF' && echo ok || echo "skipped: set it by hand in Settings > Branches"
+echo "== merge settings: squash only, delete branch after merge"
+gh api -X PATCH "repos/$repo" -F allow_squash_merge=true -F allow_merge_commit=false \
+    -F allow_rebase_merge=false -F delete_branch_on_merge=true >/dev/null
+
+# No direct pushes to main; every change goes through a PR approved by a code owner (.github/CODEOWNERS)
+# with green CI. enforce_admins=false lets the repo owner merge their own PRs (GitHub forbids self-approval).
+echo "== branch protection on main (private repo needs GitHub Pro / Student Pack)"
+gh api -X PUT "repos/$repo/branches/main/protection" --input - >/dev/null <<'EOF' && echo ok || echo "FAILED: private repos need GitHub Pro (free with the GitHub Student Developer Pack) or a public repo"
 {
-  "required_status_checks": { "strict": false,
+  "required_status_checks": { "strict": true,
     "contexts": ["build+test plain", "build+test thread", "build+test address"] },
   "enforce_admins": false,
-  "required_pull_request_reviews": { "required_approving_review_count": 1 },
+  "required_pull_request_reviews": { "required_approving_review_count": 1,
+    "require_code_owner_reviews": true, "dismiss_stale_reviews": true },
+  "required_conversation_resolution": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
   "restrictions": null
 }
 EOF

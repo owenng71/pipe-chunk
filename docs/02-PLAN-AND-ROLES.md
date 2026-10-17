@@ -38,14 +38,15 @@ plus measuring it. Each person can work in parallel once the interfaces in Overv
 
 ### Branch → PR → merge
 1. Take an issue, assign yourself, move to *In Progress*.
-2. Branch: `feat/<id>-short-name` (e.g. `feat/w1-08-queue`), or `fix/...` for bugs.
+2. Branch off `main`: `feature/<id>-short-name` (e.g. `feature/w1-08-queue`), or `fix/...` for bugs.
 3. Small commits, imperative messages: `Add close() to bounded queue`.
 4. Open a PR with `Closes #<issue>` in the description.
-5. **Merge rules on `main`** (branch protection): PR required · 1 approval · CI green · no direct pushes.
-6. Squash-merge, delete the branch.
+5. **Merge rules on `main`** (enforced by GitHub branch protection): no direct pushes · PR required ·
+   approval from Phat (`.github/CODEOWNERS`) · CI green · all review comments resolved.
+6. Phat squash-merges; GitHub deletes the branch automatically.
 
-**Reviewer rotation:** Vy's PRs → Son reviews · Son's PRs → Vy reviews · Phat's PRs → either. Phat
-also skims every PR touching `pipeline.c` or `tests/`.
+**Review:** Phat reviews and merges every PR. Vy and Son are encouraged to review each other's PRs
+too (extra eyes), and review Phat's PRs before he merges them.
 
 ### Definition of Done (for every task)
 - [ ] Code merged to `main`, CI green (build + unit tests + TSan + ASan)

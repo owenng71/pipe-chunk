@@ -14,4 +14,4 @@ Rules when writing code:
 - Functions return 0/-1 and keep errno; never `exit()` inside a module; raw read/write only in `io.c`.
 - Respect buffer ownership: one stage owns a record at a time. A data race is a bug even if tests pass.
 - Don't implement a teammate's module unless asked. Mark known shortcuts with `// limit:`.
-- Workflow: branch `feat/<task-id>-name` → PR with `Closes #N` → 1 approval + green CI → squash-merge.
+- Workflow: never commit to `main`. Branch `feature/<task-id>-name` → PR with `Closes #N` → Phat approves + green CI → squash-merge.

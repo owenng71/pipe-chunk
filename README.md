@@ -126,11 +126,20 @@ Status ✅ = in the repo · 🧱 = stub (compiles, returns an error, owner fills
 ## 4. How we work (short version; full rules in [Plan §2](docs/02-PLAN-AND-ROLES.md))
 
 1. Pick your issue on the board, assign yourself, move it to **In Progress**.
-2. `git switch -c feat/w1-08-queue` (branch = `feat/<task-id>-<short-name>`, or `fix/...`).
-3. Code + unit test. Before pushing: `make && make test && make SAN=thread test`.
-4. Push and open a PR with `Closes #<issue number>`. The PR template has the Definition-of-Done checklist.
-5. 1 approval + green CI → **squash-merge** and delete the branch.
-   Reviewers: Vy's PRs → Son · Son's PRs → Vy · Phat's PRs → either.
+`main` is protected: **nobody pushes to it directly**. Every change goes through a pull request.
+
+```sh
+git switch main && git pull                 # start from the latest main
+git switch -c feature/w1-08-queue           # feature/<task-id>-<short-name>, or fix/<short-name>
+# ... code + unit test, commit often ...
+make && make test && make SAN=thread test   # must pass before you push
+git push -u origin feature/w1-08-queue
+```
+
+Then on GitHub: **Compare & pull request** → base `main` → write `Closes #<issue number>` → fill the checklist.
+Phat reviews. Fix any comments by pushing more commits to the same branch.
+When CI is green and Phat approves, Phat **squash-merges** and the branch is deleted automatically.
+Then `git switch main && git pull` before starting your next task.
 
 Rules for code (from Overview §11): C11, `-Wall -Wextra` clean; functions return `0`/`-1` and keep
 `errno`; never `exit()` inside a module; no raw `read`/`write` outside `io.c`; mark known shortcuts with `// limit:`.
