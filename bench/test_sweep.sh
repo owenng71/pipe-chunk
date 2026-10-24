@@ -79,6 +79,11 @@ elif [[ "$rate" != none ]]; then
 else
   group=core
 fi
+if [[ "$group" == memory && "${SWEEP_TEST_TRACE_MEMORY:-0}" == 1 &&
+      ! -e "$SWEEP_TEST_DIR/first-memory-marker" ]]; then
+  printf 'stub: first memory invocation\n' >&2
+  : >"$SWEEP_TEST_DIR/first-memory-marker"
+fi
 key="${group}_${mode}_${queue}_${workers}_${block}_${rate}_${unbounded}"
 key="${key//[^a-zA-Z0-9_.-]/_}"
 mkdir -p -- "$SWEEP_TEST_DIR/counters"
@@ -116,7 +121,7 @@ peak_rss=64
 if [[ "$count" -ge 1 && "$count" -le 5 ]] && {
   [[ "$group" == core && "$mode" == pipeline && "$queue" == 1 && "$workers" == 1 && "$block" == 4096 && "$rate" == none && "$unbounded" == no ]] ||
   [[ "$group" == baseline && "$mode" == blocking && "$block" == 4096 ]] ||
-  [[ "$group" == memory && "$mode" == pipeline && "$queue" == 4 && "$workers" == 4 && "$block" == 65536 && "$rate" == 1 && "$unbounded" == no ]]
+  [[ "$group" == memory && "$mode" == pipeline && "$queue" == 4 && "$workers" == 4 && "$block" == 65536 && "$rate" == 10 && "$unbounded" == no ]]
 }; then
   case "$count" in
     1) value=9;   lat_p50=900;   peak_rss=90 ;;
@@ -270,6 +275,23 @@ assert_memory_settings() {
   ' "$file"
 }
 
+assert_memory_estimate() {
+  local log="$1" input_bytes="$2" rate="$3" expected_duration="$4"
+  awk -v input_bytes="$input_bytes" -v rate="$rate" -v expected_duration="$expected_duration" '
+    /^sweep: memory-series estimated duration:/ {
+      estimates++
+      estimate_line = NR
+      if (index($0, "~" expected_duration) &&
+          index($0, "10 runs; input_bytes=" input_bytes " each") &&
+          index($0, "output_rate=" rate " MB/s decimal") &&
+          index($0, "assumes output-bound runs") &&
+          index($0, "excludes setup/teardown overhead")) valid = 1
+    }
+    /^stub: first memory invocation$/ { first_memory_line = NR }
+    END { exit !(estimates == 1 && valid && first_memory_line > estimate_line) }
+  ' "$log"
+}
+
 assert_run_metadata() {
   local file="$1" expected_cache="$2" expected_bytes
   expected_bytes="$(stat -c '%s' -- "$INPUT")"
@@ -344,8 +366,10 @@ chmod +x -- "$VERIFY_SUCCESS"
 
 new_run_context default
 ACCEPTED_DIR="$TEST_ROOT/new-parent/accepted-run"
-if ! PIPE_CHUNK_TESTING=1 PIPE_CHUNK_VERIFY_SCRIPT="$VERIFY_SUCCESS" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$ACCEPTED_DIR" --verify; then
+if ! SWEEP_TEST_TRACE_MEMORY=1 PIPE_CHUNK_TESTING=1 PIPE_CHUNK_VERIFY_SCRIPT="$VERIFY_SUCCESS" \
+  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$ACCEPTED_DIR" --verify \
+  >"$SWEEP_TEST_DIR/sweep.log" 2>&1; then
+  cat -- "$SWEEP_TEST_DIR/sweep.log" >&2
   printf 'test_sweep: nonexistent in-tree --out-dir was not accepted\n' >&2
   exit 1
 fi
@@ -398,8 +422,12 @@ assert_median_metrics "$ACCEPTED_DIR/medians.csv" memory unbounded 4 4 65536 30 
   printf 'test_sweep: fixture median for the unbounded memory group was incorrect\n' >&2
   exit 1
 }
-assert_memory_settings "$ACCEPTED_DIR/runs.csv" 4 4 65536 1 || {
+assert_memory_settings "$ACCEPTED_DIR/runs.csv" 4 4 65536 10 || {
   printf 'test_sweep: memory comparison defaults were not recorded correctly\n' >&2
+  exit 1
+}
+assert_memory_estimate "$SWEEP_TEST_DIR/sweep.log" "$(stat -c '%s' -- "$INPUT")" 10 00:00:01 || {
+  printf 'test_sweep: duration estimate was missing, inaccurate, repeated, or after the first memory invocation\n' >&2
   exit 1
 }
 assert_run_metadata "$ACCEPTED_DIR/runs.csv" warm || {

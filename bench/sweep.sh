@@ -20,8 +20,9 @@ readonly VERIFY_SCRIPT_PATH="$REPO_ROOT/scripts/verify.sh"
 readonly DEFAULT_MEMORY_QUEUE=4
 readonly DEFAULT_MEMORY_WORKERS=4
 readonly DEFAULT_MEMORY_BLOCK_SIZE=65536
-readonly DEFAULT_OUT_RATE_MB_S=1
+readonly DEFAULT_OUT_RATE_MB_S=10
 readonly TRIALS=5
+readonly MEMORY_RUN_COUNT=$((2 * TRIALS))
 
 RUNS_HEADER='run_group,mode,status,queue_cap,workers,block_bytes,trial,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s'
 MEDIANS_HEADER='run_group,mode,queue_cap,workers,block_bytes,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s'
@@ -32,7 +33,7 @@ usage() {
 Usage: bench/sweep.sh --bin PATH --input PATH [--out-dir PATH]
        [--cache warm|larger|drop] [--verify]
        [--memory-queue N] [--memory-workers N] [--memory-block-size BYTES]
-       [--out-rate MB_PER_S]
+       [--out-rate MB_PER_S (default: 10)]
 
 Runs the W3-01 core matrix, blocking baseline, and matched memory comparison.
 Relative --out-dir paths are resolved from the repository root.
@@ -281,6 +282,7 @@ declare -A GROUP_SUCCESS=()
 declare -A GROUP_VALUES=()
 overall_failure=0
 run_number=0
+memory_estimate_printed=0
 
 drop_caches_before_trial() {
   if ! sync; then
@@ -337,6 +339,20 @@ parse_summary() {
   METRIC_VALUES=("${values[@]}")
 }
 
+estimate_memory_duration() {
+  awk -v input_bytes="$INPUT_BYTES" -v runs="$MEMORY_RUN_COUNT" -v rate="$OUT_RATE_MB_S" '
+    BEGIN {
+      exact = input_bytes * runs / (rate * 1000000)
+      seconds = int(exact)
+      if (seconds < exact) seconds++
+      hours = int(seconds / 3600)
+      minutes = int((seconds - hours * 3600) / 60)
+      seconds = seconds - hours * 3600 - minutes * 60
+      printf "%02d:%02d:%02d", hours, minutes, seconds
+    }
+  '
+}
+
 append_run_row() {
   local group="$1" mode="$2" status="$3" queue_cap="$4" workers="$5"
   local block_bytes="$6" trial="$7" rate="$8"
@@ -352,6 +368,12 @@ append_run_row() {
 for ((trial = 1; trial <= TRIALS; trial++)); do
   for config in "${CONFIGS[@]}"; do
     IFS='|' read -r group report_mode queue_cap workers block_bytes rate unbounded <<<"$config"
+    if [[ "$group" == memory ]] && (( ! memory_estimate_printed )); then
+      estimated_duration="$(estimate_memory_duration)"
+      printf 'sweep: memory-series estimated duration: ~%s (10 runs; input_bytes=%s each; output_rate=%s MB/s decimal; assumes output-bound runs; excludes setup/teardown overhead)\n' \
+        "$estimated_duration" "$INPUT_BYTES" "$OUT_RATE_MB_S" >&2
+      memory_estimate_printed=1
+    fi
     run_number=$((run_number + 1))
     run_id="$(printf '%04d' "$run_number")"
     group_key="$group|$report_mode|$queue_cap|$workers|$block_bytes|$INPUT_BYTES|$CACHE_METHOD|$rate"
