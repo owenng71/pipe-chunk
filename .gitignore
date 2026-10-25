@@ -7,3 +7,5 @@ bench/results/
 __pycache__/
 *.pyc__pycache__/
 *.pyc
+__pycache__/
+*.pyc
