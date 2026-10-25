@@ -273,7 +273,7 @@ io-pipeline/
 /* queue.h — Son */
 bq_t  *bq_create(size_t capacity);          // capacity 0 = unbounded
 int    bq_push(bq_t *q, record_t *r);       // blocks while full; -1 if closed
-int    bq_pop(bq_t *q, record_t **out);     // blocks while empty; 0 = closed and empty
+int    bq_pop(bq_t *q, record_t **out);     // blocks while empty; 1 = got one, 0 = closed and empty
 void   bq_close(bq_t *q);                   // wake everyone
 size_t bq_size(bq_t *q);
 void   bq_destroy(bq_t *q);
@@ -283,6 +283,7 @@ pool_t   *pool_create(size_t nbufs, size_t bufsize);   // nbufs 0 = unbounded (m
 record_t *pool_get(pool_t *p);                          // blocks while empty; NULL if closed
 void      pool_put(pool_t *p, record_t *r);
 void      pool_close(pool_t *p);
+void      pool_destroy(pool_t *p);                      // frees all trays and their original buffers; call only after every user has stopped
 
 /* io.h — Vy */
 ssize_t read_full(int fd, void *buf, size_t n);              // loops on short/EINTR/EAGAIN; <n only at EOF; -1 on error
@@ -298,7 +299,10 @@ int pipeline_run(const config_t *cfg);      // returns exit code
 
 - Target: **Ubuntu 24.04, gcc, C11, pthreads**. Only external library: OpenSSL `libcrypto` (SHA-256), approved by the lecturer.
 - Build flags: `-std=c11 -Wall -Wextra -O2 -g -pthread`; CI also builds with `-fsanitize=thread` and `-fsanitize=address`.
-- Error convention: functions return `0`/`-1` and keep `errno`; never `exit()` from inside a module.
+- Error convention: return values explicitly specified by the frozen section 10 interface
+  contracts take precedence over the generic status convention. Other status-returning functions
+  return `0`/`-1` and preserve `errno`; functions with other agreed return types follow their header
+  contracts and preserve `errno` on failure. Never `exit()` from inside a module.
 - Every syscall that can be short or interrupted goes through `io.c` helpers — never call raw `read`/`write` elsewhere.
 - Respect the ownership table in §5.2. A data race is a bug even if tests pass.
 - Keep it simple: no extra abstractions, no third-party libraries. Mark known shortcuts with a `// limit:` comment.

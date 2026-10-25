@@ -38,10 +38,12 @@ plus measuring it. Each person can work in parallel once the interfaces in Overv
 
 ### Branch → PR → merge
 1. Take an issue, assign yourself, move to *In Progress*.
-2. Branch: `feat/<id>-short-name` (e.g. `feat/w1-08-queue`), or `fix/...` for bugs.
+2. Branch: `feat/<task-id>-<short-name>` (e.g. `feat/w1-08-queue`).
 3. Small commits, imperative messages: `Add close() to bounded queue`.
 4. Open a PR with `Closes #<issue>` in the description.
-5. **Merge rules on `main`** (team rule, not enforced by GitHub): PR required · 1 approval · CI green · no direct pushes.
+5. **Merge rules on `main`** (team rule, not enforced by GitHub): PR required · 1 approval · CI
+   green · no direct pushes. A change to any agreed header in Overview §10 requires approval from
+   all three members and a note in `docs/design.md`.
 6. Squash-merge, delete the branch.
 
 **Reviewer rotation:** Vy's PRs → Son reviews · Son's PRs → Vy reviews · Phat's PRs → either. Phat

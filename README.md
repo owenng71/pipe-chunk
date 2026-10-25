@@ -126,11 +126,16 @@ Status ✅ = in the repo · 🧱 = stub (compiles, returns an error, owner fills
 ## 4. How we work (short version; full rules in [Plan §2](docs/02-PLAN-AND-ROLES.md))
 
 1. Pick your issue on the board, assign yourself, move it to **In Progress**.
-2. `git switch -c feat/w1-08-queue` (branch = `feat/<task-id>-<short-name>`, or `fix/...`).
-3. Code + unit test. Before pushing: `make && make test && make SAN=thread test`.
+2. `git switch -c feat/w1-08-queue` (branch = `feat/<task-id>-<short-name>`).
+3. Code + unit test. Before opening a PR: `make && make test && make SAN=thread test && make SAN=address test`.
 4. Push and open a PR with `Closes #<issue number>`. The PR template has the Definition-of-Done checklist.
 5. 1 approval + green CI → **squash-merge** and delete the branch.
+   Changes to agreed headers in Overview §10 require approval from all three members and a note in
+   `docs/design.md`.
    Reviewers: Vy's PRs → Son · Son's PRs → Vy · Phat's PRs → either.
 
-Rules for code (from Overview §11): C11, `-Wall -Wextra` clean; functions return `0`/`-1` and keep
-`errno`; never `exit()` inside a module; no raw `read`/`write` outside `io.c`; mark known shortcuts with `// limit:`.
+Rules for code (from Overview §11): C11, `-Wall -Wextra` clean; frozen Overview §10 return values
+take precedence over the generic rule for status-returning functions to return `0`/`-1`; preserve
+`errno`; other agreed return types follow their header contracts and preserve `errno` on failure;
+never `exit()` inside a module; no raw `read`/`write` outside `io.c`; mark known shortcuts with
+`// limit:`.
