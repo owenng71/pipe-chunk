@@ -15,8 +15,7 @@ No new interface or behavior changes are recorded by establishing this log.
 - **Confirmation**: Phat confirmed these `bq_pop()` return values on 2026-10-24.
 - **Rationale**: Keep the overview's shared contract consistent with the already documented queue
   header and remove the ambiguity around `bq_pop()`'s item-success value.
-- **Approval**: All three members approved the section 10 clarification in the PR; approval was
-  confirmed by the user on 2026-10-24.
+- **Approval**: Approved by Phat and Vy in PR #<1>, merged <25.10.2026>.
 - **Status**: The required shared-contract review is complete and recorded.
 
 ## W1-09 — `pool_destroy` interface proposal
@@ -28,8 +27,8 @@ No new interface or behavior changes are recorded by establishing this log.
 - **Rationale**: Reclaim all pool-owned memory at shutdown while preserving ownership of any
   external buffer address currently stored in a tray's `buf` field. Destroying queues first removes
   queued record references before the pool frees tray storage.
-- **Approval**: Pending a pull request approved by all three team members.
-- **Status**: Proposed; do not treat as an approved shared contract until that review is complete.
+- **Approval**: Approved by Phat and Vy in PR #<1> (W1-08 and section 10 updates), merged <25.10.2026>; the PR added `void pool_destroy(pool_t *p);` to Overview section 10.
+- **Status**: Approved section 10 interface
 
 ## W2-06 — Pipeline metrics interface proposal
 
