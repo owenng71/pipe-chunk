@@ -3,3 +3,4 @@ build-*/
 *.bin
 *.manifest
 bench/results/*.csv
+CLAUDE.md
