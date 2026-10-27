@@ -8,6 +8,82 @@
 
 ---
 
+## 0. Status & re-plan (as of Tue 27 Oct 2026)
+
+> Sections 3–5 are the original plan and are kept as written. **This section is the current plan.**
+> The proposed dates below need a quick "ok" from all three in the group chat.
+
+### 0.1 Where we are
+
+| State | Tasks |
+|---|---|
+| ✅ Done (on `main`) | W1-01 repo · W1-02 skeleton · W1-03 design review (`common.h`) · W1-04 `setup.sh` + README · W1-05 CI (plain/TSan/ASan) · W1-06 `gen_input.sh` + `verify.sh` · W1-08 queue (#1) · W2-06 **interface only**: `metrics.h` proposal (#2) |
+| 🔍 In review | W1-09 pool (#5, Son): **plain CI job failing**, no approval yet · W3-01 sweep (#3, Son): CI green, needs review · W3-02 plots (#4, Son): CI green, needs review |
+| 🧱 Stub on `main`, not started | W1-07 `io.c` (Vy) · W1-10 `baseline.c` (Vy) · W2-01 `pipeline.c` (Phat) |
+| ⏳ Not started | W1-11 · W2-02 faults · W2-03 ratelimit · W2-04 cancel · W2-05 supervisor · W2-06 `metrics.c` · W2-07 stdin · W2-08 mmap · W2-09 unbounded · W2-10 e2e · W2-11 memory test · W3-03…W3-09 |
+
+**The program can't copy a file yet.** Neither `--mode=blocking` nor `--mode=pipeline` works.
+Most of Sprint 1 and all of Sprint 2 have slipped into Week 3.
+
+### 0.2 Critical path
+
+| Task | Waits for | Unblocks |
+|---|---|---|
+| W1-07 `io.c` | — | W1-10, W2-01, W2-02, W2-03, W2-07, W2-08 |
+| W1-09 pool (#5) | — | W2-01, W2-09 |
+| W1-10 baseline | W1-07 | W1-11, W3-03 |
+| W2-01 pipeline | W1-07, W1-09 | W2-04, W2-05, W2-06 wiring, W2-10, W3-01 real runs |
+| W2-02 faults · W2-03 ratelimit | W1-07 | W2-10 |
+| W2-04 cancel · W2-05 supervisor | W2-01 | W2-10 |
+| W2-10 e2e matrix | W2-01…W2-05, W2-08 | W3-05 `v1.0` |
+| W3-01/02 on real binary | W2-01, W2-06 | W3-06 analysis → W3-07 report |
+
+**`io.c` (W1-07) and the pool (#5) block everyone. Both must be merged on Tue 27 or Wed 28 at the latest.**
+
+### 0.3 Scope cut (to fit the remaining days)
+
+| Keep: acceptance gate needs it | Should: do if on time | Cut / after 1 Nov |
+|---|---|---|
+| W1-07, W1-09, W1-10, W2-01 (gate #2 needs a pipeline) | W2-07 nonblocking stdin + `poll` | W3-04 stretch (zero-copy / `pwritev`) |
+| W2-02 faults (short I/O, EINTR) · W2-03 `--out-rate` (slow consumer) | W2-11 RSS assertion test | Docker (already planned for after 1 Nov) |
+| W2-04 Ctrl+C · W2-05 `--fail-worker` (simple version: replacement + requeue) | `--fault-eagain` / `--fault-delay-us` cases | |
+| W2-06 `metrics.c` · W2-09 `--unbounded` (memory blow-up demo) | blocking vs nonblocking comparison in W3-03 | |
+| W2-08 `--io=mmap` (the brief needs ≥2 I/O strategies: rw vs mmap) | | |
+| W2-10 e2e matrix (short, EINTR, slow output, fail-worker, SIGINT) | | |
+| W3-01/02 sweeps + graphs · W3-05 clean VM · W3-06…09 | | |
+
+### 0.4 Day-by-day plan (proposed)
+
+**Proposed:** move the **code freeze from Thu 29 to the end of Fri 30 Oct**, so Saturday is for
+measuring and Sunday is for the report and slides. If the lecturer's hard deadline (§8) is later than
+1 Nov, use the extra days for the report instead of more features.
+
+| Day | Vy | Son | Phat |
+|---|---|---|---|
+| **Tue 27** | **W1-07 `io.c` + `test_io.c` → PR today** | Fix the failing plain CI job on #5, merge the pool · address review on #3/#4 | Review #3, #4, #5 (and #5's `pool_destroy` design entry) · draft W2-01 against `queue.h`/`pool.h`/`io.h` |
+| **Wed 28** | W1-10 baseline · W2-02 faults (short + EINTR first) | W2-06 `metrics.c` + `test_metrics.c` · W2-09 `--unbounded` | Review `io.c` · W2-01 pipeline merged (reader, workers, writer, bitmap, shutdown order) · W1-11 baseline e2e in CI |
+| **Thu 29** | W2-03 ratelimit · W2-08 `--io=mmap` | W2-04 cancel (sigwait, drain, exit 130) | W2-05 supervisor (simple version) · start `tests/e2e.sh` |
+| **Fri 30** | W2-07 stdin `poll` (should) · fix e2e failures in `io.c`/faults | Help Phat with e2e cases (SIGINT, slow output) · W2-11 RSS test (taken over from Phat) | W2-10 e2e matrix green in CI · wire metrics calls in the pipeline · **🔒 code freeze 23:59** |
+| **Sat 31** | W3-03 rw vs mmap (cold/warm) | W3-01 sweep on the real binary · W3-02 graphs | W3-05 clean-VM run, tag `v1.0` · W3-06 analysis together (evening) |
+| **Sun 1** | W3-07 report (own module) · W3-08 knowledge share · W3-09 slides + rehearsal | same | same |
+
+**Daily check:** by 22:00, everyone posts what got merged. A blocking PR (io, pool, pipeline) gets
+reviewed within 2 hours of being opened.
+
+### 0.5 Open items found in the 27 Oct review
+
+- `docs/design.md` W2-06 entry still says *"proposed, pending Phat and Vy re-review"*, but #2 is
+  merged. Son: update the status line (the gate allows `metrics.c` to start).
+- `docs/design.md` W1-09 `pool_destroy` entry is *"Pending"*. It needs all-three approval on #5.
+- Overview §10 shows the repo root as `io-pipeline/`; the repo is `pipe-chunk/`. Cosmetic.
+- No GitHub issues exist (`gh issue list` is empty), so PRs can't follow §2's `Closes #<issue>`
+  step. Until the team decides otherwise, a PR names its task ID in the title (e.g.
+  `W1-07 io.c read_full/pwrite_full`) and the board tracks the PR instead of an issue.
+- §8 hard deadline and report format are still unconfirmed. **Ask the lecturer this week.** The
+  proposed freeze move depends on it.
+
+---
+
 ## 1. Team & roles
 
 | Member | Role | Owns (code + tests + docs for these) |

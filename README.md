@@ -98,13 +98,13 @@ Status ✅ = in the repo · 🧱 = stub (compiles, returns an error, owner fills
 | `pipeline.h` | Phat | ✅ | Declares the two run modes: `pipeline_run()` and `baseline_run()`. Both return the process exit code. |
 | `pipeline.c` | Phat · W2-01, W2-05 | 🧱 | The concurrent version. Creates the pool, Q1 and Q2. Starts the reader, N workers and the writer. The writer `pwrite`s each block at its offset and drops duplicates with a seq bitmap. Contains the **supervisor**, which joins a dead worker, spawns a replacement and re-queues its block. Owns the shutdown order (EOF → close Q1 → join workers → close Q2 → join writer → fsync). |
 | `baseline.c` | Vy · W1-10 | 🧱 | `--mode=blocking`: one thread, loop of read → SHA-256 → pwrite → manifest line. The reference for correctness and speed. |
-| `queue.h/.c` | Son · W1-08, W2-09 | 🧱 | **Bounded blocking queue** (ring buffer + mutex + `not_full`/`not_empty` condition variables). `bq_push` blocks while full, which is what creates backpressure. `bq_pop` blocks while empty. `bq_close` wakes every waiting thread. Capacity 0 = unbounded (demo). |
+| `queue.h/.c` | Son · W1-08, W2-09 | ✅ bounded · ⏳ unbounded (W2-09) | **Bounded blocking queue** (ring buffer + mutex + `not_full`/`not_empty` condition variables). `bq_push` blocks while full, which is what creates backpressure. `bq_pop` blocks while empty. `bq_close` wakes every waiting thread. Capacity 0 = unbounded (demo). |
 | `pool.h/.c` | Son · W1-09, W2-09 | 🧱 | **Buffer pool**: a fixed number of pre-allocated `record_t` trays. `pool_get` blocks when every tray is in use, which caps memory at `trays × block_size`. `nbufs` 0 = malloc on demand (unbounded demo). |
 | `io.h/.c` | Vy · W1-07, W2-07, W2-08 | 🧱 | The only place that calls `read`/`write`. `read_full` loops until it has `n` bytes or hits EOF, retrying on short reads, `EINTR` and `EAGAIN`. `pwrite_full` does the same for writes at an offset. Later: nonblocking stdin with `poll()` and `--io=mmap`. |
 | `faults.h/.c` | Vy · W2-02 | ⏳ | Fault injection. Wrappers around the real syscalls that, with the probabilities from `--fault-*`, fake short reads/writes, `EINTR`, `EAGAIN` and delays. `--seed` makes a run reproducible. |
 | `ratelimit.h/.c` | Vy · W2-03 | ⏳ | Token bucket used by `--in-rate` / `--out-rate` to make the reader or writer artificially slow (slow-disk simulation). |
 | `cancel.h/.c` | Son · W2-04 | ⏳ | Ctrl+C handling. A dedicated signal thread uses `sigwait`. First SIGINT = graceful drain (stop reading, finish every accepted block, exit 130). Second SIGINT = hard stop. |
-| `metrics.h/.c` | Son · W2-06 | ⏳ | Measurements: per-block latency (p50/p99), a monitor thread sampling queue occupancy every 10 ms, CPU and peak memory via `getrusage`, I/O-wait timers, CSV output for `--metrics=PREFIX`. |
+| `metrics.h/.c` | Son · W2-06 | 🧱 `.h` proposed, `.c` ⏳ | Measurements: per-block latency (p50/p99), a monitor thread sampling queue occupancy every 10 ms, CPU and peak memory via `getrusage`, I/O-wait timers, CSV output for `--metrics=PREFIX`. |
 
 ### Everything else
 
