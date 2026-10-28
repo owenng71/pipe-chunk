@@ -133,8 +133,3 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [ ] Fault injection, worker supervisor, graceful Ctrl+C, nonblocking stdin, `mmap` input
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory
-
-## Authors
-
-Operating Systems course project. Led by Phat ([@owenng71](https://github.com/owenng71)); bounded
-queue by Son.
