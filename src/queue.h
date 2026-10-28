@@ -1,4 +1,4 @@
-/* queue.h — bounded blocking queue (Son, W1-08). */
+/* queue.h — bounded blocking queue. */
 #ifndef QUEUE_H
 #define QUEUE_H
 

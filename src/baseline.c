@@ -1,4 +1,4 @@
-/* baseline.c — STUB, Vy implements in W1-10. */
+/* baseline.c — --mode=blocking: single-threaded read → SHA-256 → pwrite → manifest. Not implemented yet. */
 #include <stdio.h>
 #include "pipeline.h"
 

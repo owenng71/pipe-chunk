@@ -1,4 +1,4 @@
-/* pool.h — fixed buffer (tray) pool (Son, W1-09). */
+/* pool.h — fixed buffer (tray) pool. */
 #ifndef POOL_H
 #define POOL_H
 

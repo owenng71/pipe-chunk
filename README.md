@@ -1,141 +1,140 @@
-# pipe-chunk: asynchronous I/O pipeline with bounded buffers and backpressure
+# pipe-chunk
 
-OS course project #11 (area: input/output devices). Team: **Phat · Vy · Son**.
+[![ci](https://github.com/owenng71/pipe-chunk/actions/workflows/ci.yml/badge.svg)](https://github.com/owenng71/pipe-chunk/actions/workflows/ci.yml)
 
-`pipe-chunk` is a parallel file copier. A **reader** thread splits the input file into blocks,
-**worker** threads compute a SHA-256 checksum for each block, and a **writer** thread `pwrite`s every
-block to the output and appends one line `seq,offset,len,sha256` to a manifest. Bounded queues and a
-fixed buffer pool keep memory bounded when one stage is slower than the others (**backpressure**).
-The program must stay correct under partial I/O, slow output, a crashing worker and Ctrl+C.
+A parallel file copier in C11 and POSIX threads, built to study **bounded buffers, backpressure and
+robust I/O** on Linux.
 
-| Read this | For |
-|---|---|
-| [docs/01-PROJECT-OVERVIEW.md](docs/01-PROJECT-OVERVIEW.md) | **What** we build and **why**: concepts, architecture, buffer ownership, CLI |
-| [docs/02-PLAN-AND-ROLES.md](docs/02-PLAN-AND-ROLES.md) | **Who** does **what**, **when**: roles, 3 sprints, every task, GitHub workflow |
-| GitHub **Issues** / **Projects** tab | Live status of every task (one issue per task ID, e.g. `W1-08 Bounded queue`) |
+A **reader** thread splits the input into fixed-size blocks, **worker** threads compute a SHA-256
+checksum for each block, and a **writer** thread `pwrite`s every block to its offset in the output
+and records `seq,offset,len,sha256` in a manifest. Bounded queues and a fixed buffer pool keep memory
+constant when one stage is slower than the others. The copy must stay correct under partial reads
+and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
+
+> **Status: in development.** The build, CLI, CI and the bounded queue are done; the I/O layer,
+> buffer pool and both run modes are in progress. See [Roadmap](#roadmap).
 
 ---
 
-## 1. Set up your machine (no Docker needed)
+## Architecture
 
-Target platform: **Ubuntu 24.04** with gcc, make and OpenSSL `libcrypto`. That is everything.
-macOS and native Windows are **not** supported (we use Linux-only syscalls and `/proc`).
+```
+            ┌──────────── buffer pool (fixed number of trays) ◀────────────┐
+            ▼                                                              │
+ input ─▶ Reader ─▶ [ Q1: bounded ] ─▶ Workers ×N ─▶ [ Q2: bounded ] ─▶ Writer ─▶ output + manifest
+                                       (SHA-256)                       (pwrite at offset)
+                                           ▲
+                                       Supervisor (respawns a dead worker, re-queues its block)
+```
 
-### 1a. You run Ubuntu (native, VM or dual boot)
+**Backpressure.** If the writer is slow, Q2 fills and workers block; then Q1 fills and the reader
+blocks. Every stage runs at the speed of the slowest one, and data memory never exceeds
+`trays × block_size`. `--unbounded` turns this off to show memory growing without flow control.
+
+**Buffer ownership.** A block (`record_t`) is owned by exactly one stage at a time and only its
+pointer moves between stages, never the data:
+
+| Step | Ownership |
+|---|---|
+| `pool_get()` | pool → reader |
+| `bq_push(Q1)` / `bq_pop(Q1)` | reader → Q1 → worker |
+| `bq_push(Q2)` / `bq_pop(Q2)` | worker → Q2 → writer |
+| `pool_put()` after `pwrite` + manifest line | writer → pool |
+| worker dies holding a block | supervisor → Q1 (retry, at most `MAX_ATTEMPTS`) |
+
+**Correctness without reordering.** Workers finish out of order. The writer uses `pwrite` at each
+block's offset (idempotent) and keeps a bitmap of written sequence numbers, so a retried block is
+never written or listed twice.
+
+**Shutdown.** At end of input: close Q1 → workers drain and exit → close Q2 → writer drains →
+`fsync`. The first Ctrl+C stops reading and finishes every accepted block (exit code 130); a second
+Ctrl+C stops immediately.
+
+**Robust I/O.** Every `read`/`write` goes through one module (`io.c`) that retries short counts,
+`EINTR` and `EAGAIN`. Fault injection (`--fault-*`, `--fail-worker`) forces those paths in tests.
+
+---
+
+## Build
+
+Requirements: Linux (Ubuntu 24.04 tested), gcc, make, OpenSSL `libcrypto`.
 
 ```sh
-sudo apt-get update && sudo apt-get install -y git
-git clone https://github.com/owenng71/pipe-chunk.git   # private repo: ask Phat to add you as collaborator
+git clone https://github.com/owenng71/pipe-chunk.git
 cd pipe-chunk
-./scripts/setup.sh        # installs build-essential, libssl-dev, python3 (asks for your sudo password)
+./scripts/setup.sh        # installs build-essential, libssl-dev, python3 (uses sudo)
+make                      # builds build/pipe-chunk
 ```
 
-### 1b. You run Windows → use WSL 2
+On Windows, use WSL 2 with Ubuntu 24.04 and clone into the Linux home directory, not `/mnt/c`.
 
-1. Open **PowerShell as Administrator** and run:
-   ```powershell
-   wsl --install -d Ubuntu-24.04
-   ```
-   Restart if asked, then open **Ubuntu 24.04** from the Start menu and choose a Linux username and password.
-2. Inside the Ubuntu terminal, follow **1a** exactly.
-
-> Clone into your Linux home (`~/pipe-chunk`), **not** into `/mnt/c/...` or `/mnt/d/...`.
-> Windows drives under WSL are slow and lose the executable bit on scripts.
-> In VS Code: install the **WSL** extension, then run `code .` from the Ubuntu terminal.
-
-### 1c. Check that it works
+## Usage
 
 ```sh
-make                      # builds build/pipe-chunk, no warnings expected
-make test                 # runs every unit test in tests/
-./build/pipe-chunk --help # prints all options
-```
-
-If `make` says `openssl/sha.h: No such file`, you skipped `./scripts/setup.sh`.
-
----
-
-## 2. Build, test, run
-
-| Command | What it does |
-|---|---|
-| `make` | Build `build/pipe-chunk` |
-| `make test` | Build and run every `tests/test_*.c` |
-| `make SAN=thread test` | Same, under **ThreadSanitizer** (finds data races), output in `build-thread/` |
-| `make SAN=address test` | Same, under **AddressSanitizer** (finds memory bugs), output in `build-address/` |
-| `make clean` | Delete all build folders |
-
-CI runs the plain, `thread` and `address` builds on every pull request. If it fails in CI, run the same `make SAN=...` locally.
-
-> ThreadSanitizer crash `FATAL: ThreadSanitizer: unexpected memory mapping` on Ubuntu 24.04?
-> Run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
-
-Run the program end to end:
-
-```sh
-./scripts/gen_input.sh 100M /tmp/in.bin                       # random 100 MB test file
-./build/pipe-chunk --mode=blocking /tmp/in.bin /tmp/out.bin   # writes out.bin + out.bin.manifest
-./scripts/verify.sh /tmp/in.bin /tmp/out.bin                  # prints VERIFY OK or VERIFY FAIL
+./scripts/gen_input.sh 100M /tmp/in.bin                         # random 100 MB test file
+./build/pipe-chunk --mode=pipeline -w 4 -q 16 -b 64K /tmp/in.bin /tmp/out.bin
+./scripts/verify.sh /tmp/in.bin /tmp/out.bin                    # prints VERIFY OK or VERIFY FAIL
 ```
 
 `verify.sh` passes only if the output is byte-identical to the input and the manifest lists every
-block exactly once. Every test and every fault-injection run is checked with it.
+block exactly once with no gaps or overlaps.
 
----
+| Option | Meaning |
+|---|---|
+| `-b, --block-size=BYTES` | block size, `K`/`M`/`G` suffixes allowed (default 64 KiB) |
+| `-q, --queue=N` | capacity of Q1 and Q2 (default 16) |
+| `-w, --workers=N` | worker threads (default 4) |
+| `--mode=blocking\|pipeline` | single-threaded baseline, or the concurrent pipeline (default) |
+| `--io=rw\|mmap` | read input with `read()` into pool buffers, or `mmap` it |
+| `--unbounded` | disable backpressure (memory-growth demonstration) |
+| `--in-rate`, `--out-rate=MB/s` | throttle the reader or the writer |
+| `--fault-short`, `--fault-eintr`, `--fault-eagain=P` | inject short I/O, `EINTR`, `EAGAIN` with probability P |
+| `--fault-delay-us=US`, `--fail-worker=P`, `--seed=N` | extra I/O delay, worker crashes, reproducible fault runs |
+| `--manifest=FILE`, `--metrics=PREFIX` | manifest path; write summary and queue-occupancy CSVs |
 
-## 3. What each file is for
+`INPUT` may be `-` to read from a pipe on stdin (nonblocking, with `poll()`). Run
+`./build/pipe-chunk --help` for the full list.
 
-Each module is one `.c` file with a `.h` file next to it. The `.h` holds the **agreed interface**
-(Overview §10). Change it only through a PR that all three members approve.
-Status ✅ = in the repo · 🧱 = stub (compiles, returns an error, owner fills it in) · ⏳ = owner creates it in that task.
+## Testing
 
-### `src/`: the program
+| Command | What it runs |
+|---|---|
+| `make test` | every unit test in `tests/` |
+| `make SAN=thread test` | the same under ThreadSanitizer (data races) |
+| `make SAN=address test` | the same under AddressSanitizer (memory errors and leaks) |
 
-| File | Owner · task | Status | What it does |
-|---|---|---|---|
-| `common.h` | All · W1-03 | ✅ | Shared types used by every module. `record_t` is one block in transit (seq, offset, len, buffer, SHA-256, timestamps, retry count). `config_t` holds every command-line option. `MAX_ATTEMPTS`. |
-| `main.c` | Phat · W1-02 | ✅ | Entry point. Parses the command line into a `config_t` with `getopt_long`, rejects bad values (exit code 2), then calls `baseline_run()` or `pipeline_run()`. No I/O or threads here. |
-| `pipeline.h` | Phat | ✅ | Declares the two run modes: `pipeline_run()` and `baseline_run()`. Both return the process exit code. |
-| `pipeline.c` | Phat · W2-01, W2-05 | 🧱 | The concurrent version. Creates the pool, Q1 and Q2. Starts the reader, N workers and the writer. The writer `pwrite`s each block at its offset and drops duplicates with a seq bitmap. Contains the **supervisor**, which joins a dead worker, spawns a replacement and re-queues its block. Owns the shutdown order (EOF → close Q1 → join workers → close Q2 → join writer → fsync). |
-| `baseline.c` | Vy · W1-10 | 🧱 | `--mode=blocking`: one thread, loop of read → SHA-256 → pwrite → manifest line. The reference for correctness and speed. |
-| `queue.h/.c` | Son · W1-08, W2-09 | 🧱 | **Bounded blocking queue** (ring buffer + mutex + `not_full`/`not_empty` condition variables). `bq_push` blocks while full, which is what creates backpressure. `bq_pop` blocks while empty. `bq_close` wakes every waiting thread. Capacity 0 = unbounded (demo). |
-| `pool.h/.c` | Son · W1-09, W2-09 | 🧱 | **Buffer pool**: a fixed number of pre-allocated `record_t` trays. `pool_get` blocks when every tray is in use, which caps memory at `trays × block_size`. `nbufs` 0 = malloc on demand (unbounded demo). |
-| `io.h/.c` | Vy · W1-07, W2-07, W2-08 | 🧱 | The only place that calls `read`/`write`. `read_full` loops until it has `n` bytes or hits EOF, retrying on short reads, `EINTR` and `EAGAIN`. `pwrite_full` does the same for writes at an offset. Later: nonblocking stdin with `poll()` and `--io=mmap`. |
-| `faults.h/.c` | Vy · W2-02 | ⏳ | Fault injection. Wrappers around the real syscalls that, with the probabilities from `--fault-*`, fake short reads/writes, `EINTR`, `EAGAIN` and delays. `--seed` makes a run reproducible. |
-| `ratelimit.h/.c` | Vy · W2-03 | ⏳ | Token bucket used by `--in-rate` / `--out-rate` to make the reader or writer artificially slow (slow-disk simulation). |
-| `cancel.h/.c` | Son · W2-04 | ⏳ | Ctrl+C handling. A dedicated signal thread uses `sigwait`. First SIGINT = graceful drain (stop reading, finish every accepted block, exit 130). Second SIGINT = hard stop. |
-| `metrics.h/.c` | Son · W2-06 | ⏳ | Measurements: per-block latency (p50/p99), a monitor thread sampling queue occupancy every 10 ms, CPU and peak memory via `getrusage`, I/O-wait timers, CSV output for `--metrics=PREFIX`. |
+CI runs all three on every push. If ThreadSanitizer aborts with `unexpected memory mapping` on
+Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 
-### Everything else
+## Repository layout
 
-| Path | Owner | What it is |
-|---|---|---|
-| `tests/test_<module>.c` | Module owner | Unit test for one module. Plain `main()` with `assert`s, exit 0 = pass. `make test` picks it up automatically by name. |
-| `tests/e2e.sh` | Phat · W2-10 | End-to-end fault matrix: runs the binary under each fault option and checks each run with `verify.sh`. |
-| `scripts/setup.sh` | Phat | Installs every build dependency on Ubuntu. |
-| `scripts/gen_input.sh` | Phat | `gen_input.sh SIZE FILE`: random test file (e.g. `100M`, `1G`, `1000001` for an uneven last block). |
-| `scripts/verify.sh` | Phat | `verify.sh IN OUT [MANIFEST]`: the correctness proof (byte-identical + every block exactly once). |
-| `scripts/github_bootstrap.sh` | Phat | One-time: creates the GitHub labels, sprint milestones, one issue per task and the project board. |
-| `bench/` | Son · W3-01, W3-02 | `sweep.sh` (parameter sweeps), `plot.py` (graphs), `results/` (CSV output, not committed). |
-| `docs/` | All | Overview, plan, `design.md` (interface/behavior changes), final report. |
-| `.github/workflows/ci.yml` | Phat | CI: build + unit tests, plain / ThreadSanitizer / AddressSanitizer, on every PR. |
-| `Makefile` | Phat | Build rules (section 2). Any new `src/*.c` or `tests/test_*.c` is picked up automatically, so you never need to edit it to add a module. |
+| Path | Contents |
+|---|---|
+| `src/main.c` | command-line parsing and mode selection |
+| `src/pipeline.c` | thread wiring, supervisor, shutdown order (`--mode=pipeline`) |
+| `src/baseline.c` | single-threaded reference implementation (`--mode=blocking`) |
+| `src/queue.c` | bounded blocking queue: ring buffer, mutex, `not_full`/`not_empty` condition variables |
+| `src/pool.c` | fixed pool of pre-allocated block buffers |
+| `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write` |
+| `src/common.h` | `record_t` (one block in transit) and `config_t` (all options) |
+| `src/metrics.h` | metrics interface: latency percentiles, queue occupancy, CPU, memory, I/O time |
+| `tests/` | one `test_<module>.c` per module; plain `main()` with `assert` |
+| `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
 
----
+## Roadmap
 
-## 4. How we work (short version; full rules in [Plan §2](docs/02-PLAN-AND-ROLES.md))
+- [x] Build system, CLI, CI with ThreadSanitizer and AddressSanitizer
+- [x] Bounded blocking queue with close/broadcast semantics and stress tests
+- [ ] Robust I/O layer (`read_full`, `pwrite_full`)
+- [ ] Buffer pool
+- [ ] Blocking baseline and end-to-end check in CI
+- [ ] Concurrent pipeline with backpressure, `--unbounded` demonstration
+- [ ] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
+- [ ] Fault injection, worker supervisor, graceful Ctrl+C, nonblocking stdin, `mmap` input
+- [ ] End-to-end fault matrix in CI
+- [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory
 
-1. Pick your issue on the board, assign yourself, move it to **In Progress**.
-2. `git switch -c feat/w1-08-queue` (branch = `feat/<task-id>-<short-name>`).
-3. Code + unit test. Before opening a PR: `make && make test && make SAN=thread test && make SAN=address test`.
-4. Push and open a PR with `Closes #<issue number>`. The PR template has the Definition-of-Done checklist.
-5. 1 approval + green CI → **squash-merge** and delete the branch.
-   Changes to agreed headers in Overview §10 require approval from all three members and a note in
-   `docs/design.md`.
-   Reviewers: Vy's PRs → Son · Son's PRs → Vy · Phat's PRs → either.
+## Authors
 
-Rules for code (from Overview §11): C11, `-Wall -Wextra` clean; frozen Overview §10 return values
-take precedence over the generic rule for status-returning functions to return `0`/`-1`; preserve
-`errno`; other agreed return types follow their header contracts and preserve `errno` on failure;
-never `exit()` inside a module; no raw `read`/`write` outside `io.c`; mark known shortcuts with
-`// limit:`.
+Operating Systems course project. Led by Phat ([@owenng71](https://github.com/owenng71)); bounded
+queue by Son.

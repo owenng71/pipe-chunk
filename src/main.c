@@ -1,4 +1,4 @@
-/* main.c — CLI parsing (Overview §7) and mode selection. */
+/* main.c — CLI parsing (see --help) and mode selection. */
 #include <errno.h>
 #include <getopt.h>
 #include <stdio.h>

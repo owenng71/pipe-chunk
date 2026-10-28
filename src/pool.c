@@ -1,4 +1,4 @@
-/* pool.c — STUB, Son implements in W1-09. */
+/* pool.c — fixed buffer (tray) pool. Not implemented yet. */
 #include <errno.h>
 #include "pool.h"
 

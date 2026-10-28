@@ -4,7 +4,7 @@
 
 #include "common.h"
 
-int pipeline_run(const config_t *cfg);   // --mode=pipeline (Phat, W2-01)
-int baseline_run(const config_t *cfg);   // --mode=blocking (Vy, W1-10)
+int pipeline_run(const config_t *cfg);   // --mode=pipeline
+int baseline_run(const config_t *cfg);   // --mode=blocking
 
 #endif

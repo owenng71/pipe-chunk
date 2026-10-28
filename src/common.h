@@ -1,4 +1,4 @@
-/* common.h — types shared by every module (record + config). Frozen after W1-03. */
+/* common.h — types shared by every module (record + config). */
 #ifndef COMMON_H
 #define COMMON_H
 
@@ -9,7 +9,7 @@
 
 #define MAX_ATTEMPTS 3
 
-/* One block in transit ("tray"). Owned by exactly one stage at a time — see Overview §5.2. */
+/* One block in transit ("tray"). Owned by exactly one stage at a time — see "Buffer ownership" in README.md. */
 typedef struct record {
     uint64_t       seq;          // block number 0..N-1
     off_t          offset;       // byte position in input/output

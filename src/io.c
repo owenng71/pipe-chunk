@@ -1,4 +1,4 @@
-/* io.c — STUB, Vy implements in W1-07. */
+/* io.c — read_full / pwrite_full: the only place that calls read/write. Not implemented yet. */
 #include <errno.h>
 #include "io.h"
 

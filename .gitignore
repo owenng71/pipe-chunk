@@ -4,3 +4,10 @@ build-*/
 *.manifest
 bench/results/*.csv
 CLAUDE.md
+
+# Local-only planning and process files (not part of the public repo)
+docs/
+.specify/
+specs/
+scripts/github_bootstrap.sh
+.github/pull_request_template.md

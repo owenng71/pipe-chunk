@@ -1,4 +1,4 @@
-/* io.h — every short/interruptible syscall goes through here (Vy, W1-07). */
+/* io.h — every short/interruptible syscall goes through here (short counts, EINTR, EAGAIN). */
 #ifndef IO_H
 #define IO_H
 

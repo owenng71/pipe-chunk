@@ -1,4 +1,4 @@
-/* queue.c - bounded blocking queue (Son, W1-08). */
+/* queue.c - bounded blocking queue. */
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -24,7 +24,7 @@ bq_t *bq_create(size_t capacity)
     int rc;
 
     if (capacity == 0) {
-        // limit: 0 = unbounded arrives with W2-09
+        // limit: 0 = unbounded (--unbounded) is not implemented yet
         errno = EINVAL;
         return NULL;
     }

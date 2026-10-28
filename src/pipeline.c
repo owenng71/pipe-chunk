@@ -1,4 +1,4 @@
-/* pipeline.c — STUB, Phat implements in W2-01. */
+/* pipeline.c — --mode=pipeline: reader, N workers, writer, supervisor. Not implemented yet. */
 #include <stdio.h>
 #include "pipeline.h"
 
