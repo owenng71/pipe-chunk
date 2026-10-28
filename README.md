@@ -11,8 +11,8 @@ and records `seq,offset,len,sha256` in a manifest. Bounded queues and a fixed bu
 constant when one stage is slower than the others. The copy must stay correct under partial reads
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
-> **Status: in development.** The build, CLI, CI and the bounded queue are done; the I/O layer,
-> buffer pool and both run modes are in progress. See [Roadmap](#roadmap).
+> **Status: in development.** The blocking baseline (`--mode=blocking`) copies files correctly and
+> is checked end to end in CI; the concurrent pipeline is in progress. See [Roadmap](#roadmap).
 
 ---
 
@@ -72,7 +72,7 @@ On Windows, use WSL 2 with Ubuntu 24.04 and clone into the Linux home directory,
 
 ```sh
 ./scripts/gen_input.sh 100M /tmp/in.bin                         # random 100 MB test file
-./build/pipe-chunk --mode=pipeline -w 4 -q 16 -b 64K /tmp/in.bin /tmp/out.bin
+./build/pipe-chunk --mode=blocking -b 64K /tmp/in.bin /tmp/out.bin   # writes out.bin + out.bin.manifest
 ./scripts/verify.sh /tmp/in.bin /tmp/out.bin                    # prints VERIFY OK or VERIFY FAIL
 ```
 
@@ -102,8 +102,12 @@ block exactly once with no gaps or overlaps.
 | `make test` | every unit test in `tests/` |
 | `make SAN=thread test` | the same under ThreadSanitizer (data races) |
 | `make SAN=address test` | the same under AddressSanitizer (memory errors and leaks) |
+| `./tests/e2e.sh [BINARY]` | end-to-end copies of real files (100 MiB, empty, uneven sizes, stdin pipe), each checked by `verify.sh` |
 
-CI runs all three on every push. If ThreadSanitizer aborts with `unexpected memory mapping` on
+The I/O unit test replaces `read` and `pwrite` with scripted versions to force short counts,
+`EINTR`, `EAGAIN` and zero-byte writes deterministically, and also uses real signals and
+nonblocking pipes. CI runs the unit tests and `e2e.sh` for the plain, ThreadSanitizer and
+AddressSanitizer builds on every push. If ThreadSanitizer aborts with `unexpected memory mapping` on
 Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 
 ## Repository layout
@@ -119,15 +123,16 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `src/common.h` | `record_t` (one block in transit) and `config_t` (all options) |
 | `src/metrics.h` | metrics interface: latency percentiles, queue occupancy, CPU, memory, I/O time |
 | `tests/` | one `test_<module>.c` per module; plain `main()` with `assert` |
+| `tests/e2e.sh` | end-to-end runs of the binary, each verified |
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
 
 ## Roadmap
 
 - [x] Build system, CLI, CI with ThreadSanitizer and AddressSanitizer
 - [x] Bounded blocking queue with close/broadcast semantics and stress tests
-- [ ] Robust I/O layer (`read_full`, `pwrite_full`)
-- [ ] Buffer pool
-- [ ] Blocking baseline and end-to-end check in CI
+- [x] Robust I/O layer (`read_full`, `pwrite_full`)
+- [x] Buffer pool
+- [x] Blocking baseline and end-to-end check in CI
 - [ ] Concurrent pipeline with backpressure, `--unbounded` demonstration
 - [ ] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
 - [ ] Fault injection, worker supervisor, graceful Ctrl+C, nonblocking stdin, `mmap` input

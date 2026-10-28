@@ -17,7 +17,7 @@ sorted=$(mktemp); trap 'rm -f "$sorted"' EXIT
 sort -t, -k1,1n "$man" > "$sorted"
 
 awk -F, -v size="$size" '
-    NF != 4 || $4 !~ /^[0-9a-f]{64}$/ { print "bad line " NR ": " $0; exit 1 }
+    NF != 4 || length($4) != 64 || $4 ~ /[^0-9a-f]/ { print "bad line " NR ": " $0; exit 1 }
     $1 != NR - 1   { print "seq " NR - 1 " expected, got " $1 " (lost or duplicated block)"; exit 1 }
     $2 != pos      { print "seq " $1 ": offset " $2 ", expected " pos " (gap or overlap)"; exit 1 }
     $3 <= 0        { print "seq " $1 ": empty block"; exit 1 }
