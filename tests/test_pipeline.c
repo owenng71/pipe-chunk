@@ -132,6 +132,35 @@ static void test_injected_faults(void)
     free(data);
 }
 
+static int copy_with_dying_workers(size_t size, int workers, double p, unsigned char **data)
+{
+    config_t cfg = make_config(in_path, 4096, 2, workers);
+
+    *data = make_input(size);
+    cfg.fail_worker = p;
+    return pipeline_run(&cfg);
+}
+
+/*
+ * --fail-worker: dead workers are replaced and their block retried, so the copy is exact (no loss, no
+ * duplicate). One worker makes the deaths deterministic and leaves nobody else to drain Q1. With P = 1
+ * every block dies MAX_ATTEMPTS times and the run fails instead of looping.
+ */
+static void test_worker_failures(void)
+{
+    size_t size = 60 * 4096 + 99;
+    unsigned char *data;
+
+    assert(copy_with_dying_workers(size, 1, 0.2, &data) == 0);
+    check_copy(data, size, 4096);
+    free(data);
+    assert(copy_with_dying_workers(200 * 4096, 4, 0.01, &data) == 0);   // fails one run in ~5000
+    check_copy(data, 200 * 4096, 4096);
+    free(data);
+    assert(copy_with_dying_workers(size, 2, 1.0, &data) == 1);
+    free(data);
+}
+
 static void *send_sigint_later(void *arg)
 {
     struct timespec ts = { 0, 200 * 1000000 };
@@ -279,6 +308,7 @@ int main(void)
 
     test_configurations();
     test_injected_faults();
+    test_worker_failures();
     test_interrupt_drains();
     test_overwrites_longer_existing_output();
     test_stdin_input();

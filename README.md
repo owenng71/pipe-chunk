@@ -12,8 +12,8 @@ constant when one stage is slower than the others. The copy must stay correct un
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
-> rate limiting, metrics and graceful Ctrl+C work and are checked end to end in CI. Fault injection
-> and worker-failure recovery are next. See [Roadmap](#roadmap).
+> rate limiting, metrics, I/O fault injection, worker-failure recovery and graceful Ctrl+C work and
+> are checked in CI. Nonblocking stdin and `mmap` input are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -41,7 +41,7 @@ pointer moves between stages, never the data:
 | `bq_push(Q1)` / `bq_pop(Q1)` | reader → Q1 → worker |
 | `bq_push(Q2)` / `bq_pop(Q2)` | worker → Q2 → writer |
 | `pool_put()` after `pwrite` + manifest line | writer → pool |
-| worker dies holding a block | supervisor → Q1 (retry, at most `MAX_ATTEMPTS`) |
+| worker dies holding a block | supervisor → replacement worker (retry, at most `MAX_ATTEMPTS` tries) |
 
 **Correctness without reordering.** Workers finish out of order. The writer uses `pwrite` at each
 block's offset (idempotent) and keeps a bitmap of written sequence numbers, so a retried block is
@@ -132,6 +132,9 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `src/pool.c` | fixed pool of pre-allocated block buffers |
 | `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write`; times every call |
 | `src/files.c` | opening input, output and manifest; manifest lines; sync and close |
+| `src/seqset.c` | growable bitmap of written block numbers: the writer drops a repeated block |
+| `src/faults.c` | fault injection for `io.c` (`--fault-*`, `--seed`) |
+| `src/cancel.c` | `sigwait` signal thread: first Ctrl+C drains, second stops at once |
 | `src/ratelimit.c` | pacing for `--in-rate` / `--out-rate` (slow-device simulation) |
 | `src/metrics.c` | latency percentiles, queue-occupancy monitor thread, CPU, peak RSS, I/O time, CSV |
 | `src/common.h` | `record_t` (one block in transit) and `config_t` (all options) |
@@ -149,6 +152,8 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] Concurrent pipeline with backpressure, `--unbounded` demonstration
 - [x] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
 - [x] Graceful Ctrl+C: first drains accepted blocks (exit 130), second stops immediately
-- [ ] Fault injection, worker supervisor, nonblocking stdin, `mmap` input
+- [x] I/O fault injection (short counts, `EINTR`, `EAGAIN`, delays) with `--seed`
+- [x] Worker supervisor: dead workers replaced, their block retried (`--fail-worker`)
+- [ ] Nonblocking stdin, `mmap` input
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory

@@ -17,6 +17,7 @@
 #include "pool.h"
 #include "queue.h"
 #include "ratelimit.h"
+#include "seqset.h"
 
 typedef struct run {
     const config_t *cfg;
@@ -26,11 +27,24 @@ typedef struct run {
     metrics_t *metrics;
     cancel_t *cancel;
     atomic_bool failed;
+    pthread_mutex_t sup_mutex;   // guards slot_t.exited
+    pthread_cond_t sup_cond;     // a worker exited
     /* Writer-owned until it is joined. */
-    uint8_t *written;       // bitmap of written seq: a record that arrives twice is dropped
-    size_t written_bytes;
+    seqset_t written;       // seq already written: a record that arrives twice is dropped
     uint64_t bytes, blocks;
 } run_t;
+
+/*
+ * One worker. While its thread runs, the worker owns in_flight and rng; the supervisor reads them
+ * only after pthread_join, which orders the accesses.
+ */
+typedef struct slot {
+    run_t *run;
+    pthread_t thread;
+    record_t *in_flight;    // record being hashed; still set if the worker died holding it
+    unsigned rng;           // rand_r state for --fail-worker
+    bool exited;            // under run->sup_mutex
+} slot_t;
 
 /*
  * Stops the run after an error: closing the pool and both queues wakes every blocked stage. Stages
@@ -89,6 +103,7 @@ static void *reader_main(void *arg)
         }
         ratelimit_wait(&rate, (size_t)n);
         r->seq = seq++;
+        r->attempts = 0;
         r->offset = off;
         r->len = (size_t)n;
         (void)metrics_now_ns(&r->t_read_ns);
@@ -106,49 +121,94 @@ static void *reader_main(void *arg)
     return NULL;
 }
 
+/* --fail-worker: true with probability P. */
+static bool worker_dies(slot_t *s)
+{
+    double p = s->run->cfg->fail_worker;
+
+    return p > 0 && rand_r(&s->rng) < p * ((double)RAND_MAX + 1);
+}
+
+/* Starts with the slot's in_flight record if the supervisor handed one over (a retry), then pops Q1. */
 static void *worker_main(void *arg)
 {
-    run_t *run = arg;
-    record_t *r;
-    int rc;
+    slot_t *s = arg;
+    run_t *run = s->run;
+    record_t *r = s->in_flight;
+    int rc = 0;
 
     (void)metrics_thread_register(run->metrics);
-    while ((rc = bq_pop(run->q1, &r)) == 1) {
+    while (r != NULL || (rc = bq_pop(run->q1, &r)) == 1) {
+        s->in_flight = r;
+        r->attempts++;
         SHA256(r->buf, r->len, r->sha);
+        if (worker_dies(s))
+            goto out;   // injected crash: exit holding r; the supervisor retries it
+        s->in_flight = NULL;
         if (bq_push(run->q2, r) < 0)
             pool_put(run->pool, r);   // Q2 closed: the run failed
+        r = NULL;
     }
     if (rc < 0) {
         report_thread_error("worker", errno);
         run_fail(run);
     }
+out:
     metrics_thread_unregister();
+    pthread_mutex_lock(&run->sup_mutex);
+    s->exited = true;
+    pthread_cond_signal(&run->sup_cond);
+    pthread_mutex_unlock(&run->sup_mutex);
     return NULL;
 }
 
-/* Marks seq as written. Returns 1 if it already was, 0 if newly marked, -1 on allocation failure. */
-static int mark_written(run_t *run, uint64_t seq)
+/*
+ * A worker died holding s->in_flight. Its replacement gets the record directly instead of through
+ * Q1, which the reader or a Ctrl+C may already have closed. Returns true if the replacement runs.
+ */
+static bool worker_restart(run_t *run, slot_t *s)
 {
-    size_t byte = (size_t)(seq / 8);
-    uint8_t bit = (uint8_t)(1u << (seq % 8));
+    record_t *r = s->in_flight;
+    int rc;
 
-    if (byte >= run->written_bytes) {
-        size_t size = run->written_bytes ? run->written_bytes : 1024;
-        uint8_t *w;
-
-        while (size <= byte)
-            size *= 2;
-        w = realloc(run->written, size);
-        if (w == NULL)
-            return -1;
-        memset(w + run->written_bytes, 0, size - run->written_bytes);
-        run->written = w;
-        run->written_bytes = size;
+    if (r->attempts >= MAX_ATTEMPTS) {
+        fprintf(stderr, "pipe-chunk: block %" PRIu64 ": worker died %d times, giving up\n", r->seq, r->attempts);
+    } else {
+        rc = pthread_create(&s->thread, NULL, worker_main, s);
+        if (rc == 0)
+            return true;
+        report_thread_error("cannot restart worker", rc);
     }
-    if (run->written[byte] & bit)
-        return 1;
-    run->written[byte] |= bit;
-    return 0;
+    s->in_flight = NULL;
+    pool_put(run->pool, r);
+    run_fail(run);
+    return false;
+}
+
+/* Joins workers as they exit and restarts the ones that died, until none is left. */
+static void supervise(run_t *run, slot_t *slots, int nworkers)
+{
+    int live = nworkers;
+
+    pthread_mutex_lock(&run->sup_mutex);
+    while (live > 0) {
+        slot_t *s = NULL;
+
+        for (int i = 0; i < nworkers && s == NULL; i++)
+            if (slots[i].exited)
+                s = &slots[i];
+        if (s == NULL) {
+            pthread_cond_wait(&run->sup_cond, &run->sup_mutex);
+            continue;
+        }
+        s->exited = false;
+        pthread_mutex_unlock(&run->sup_mutex);
+        (void)pthread_join(s->thread, NULL);
+        if (s->in_flight == NULL || !worker_restart(run, s))
+            live--;
+        pthread_mutex_lock(&run->sup_mutex);
+    }
+    pthread_mutex_unlock(&run->sup_mutex);
 }
 
 static void *writer_main(void *arg)
@@ -169,7 +229,7 @@ static void *writer_main(void *arg)
             pool_put(run->pool, r);   // draining after an error
             continue;
         }
-        dup = mark_written(run, r->seq);
+        dup = seqset_add(&run->written, r->seq);
         if (dup != 0) {
             if (dup < 0) {
                 report_thread_error("writer", ENOMEM);
@@ -202,8 +262,9 @@ static void *writer_main(void *arg)
 
 int pipeline_run(const config_t *cfg)
 {
-    run_t run = { .cfg = cfg };
-    pthread_t reader, writer, *workers = NULL;
+    run_t run = { .cfg = cfg, .sup_mutex = PTHREAD_MUTEX_INITIALIZER, .sup_cond = PTHREAD_COND_INITIALIZER };
+    pthread_t reader, writer;
+    slot_t *workers = NULL;
     int nworkers = 0, rc;
     bool reader_started = false, writer_started = false, interrupted = false, ok;
     size_t qcap = cfg->unbounded ? 0 : cfg->queue_cap;
@@ -240,9 +301,12 @@ int pipeline_run(const config_t *cfg)
     /* Start consumers first, so the reader never fills a queue nobody drains. */
     rc = pthread_create(&writer, NULL, writer_main, &run);
     writer_started = rc == 0;
-    for (; rc == 0 && nworkers < cfg->workers; nworkers++)
-        if ((rc = pthread_create(&workers[nworkers], NULL, worker_main, &run)) != 0)
+    for (; rc == 0 && nworkers < cfg->workers; nworkers++) {
+        workers[nworkers].run = &run;
+        workers[nworkers].rng = (unsigned)cfg->seed + (unsigned)nworkers * 7919u;
+        if ((rc = pthread_create(&workers[nworkers].thread, NULL, worker_main, &workers[nworkers])) != 0)
             break;
+    }
     if (rc == 0) {
         rc = pthread_create(&reader, NULL, reader_main, &run);
         reader_started = rc == 0;
@@ -252,11 +316,14 @@ int pipeline_run(const config_t *cfg)
         run_fail(&run);   // also closes Q1, which the reader would otherwise close
     }
 
-    /* Shutdown order: reader (closes Q1 at EOF) → workers drain Q1 → close Q2 → writer drains Q2. */
+    /*
+     * Shutdown order: reader (closes Q1 at EOF) → workers drain Q1 → close Q2 → writer drains Q2.
+     * Supervise before joining the reader: if every worker died while the reader waits on a full Q1,
+     * only a restart lets it finish. Workers exit for good only once Q1 is closed.
+     */
+    supervise(&run, workers, nworkers);
     if (reader_started)
         (void)pthread_join(reader, NULL);
-    for (int i = 0; i < nworkers; i++)
-        (void)pthread_join(workers[i], NULL);
     bq_close(run.q2);
     if (writer_started)
         (void)pthread_join(writer, NULL);
@@ -284,6 +351,8 @@ teardown:
     pool_destroy(run.pool);
     metrics_destroy(run.metrics);
     free(workers);
-    free(run.written);
+    seqset_free(&run.written);
+    pthread_cond_destroy(&run.sup_cond);
+    pthread_mutex_destroy(&run.sup_mutex);
     return !ok ? 1 : interrupted ? 130 : 0;
 }
