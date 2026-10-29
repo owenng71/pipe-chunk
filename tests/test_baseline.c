@@ -102,6 +102,22 @@ static void test_sizes(void)
     copy_and_check(300000, 1 << 20);      // block larger than the file
 }
 
+/* Short counts, fake EINTR/EAGAIN and delays on every read and write: the copy must be exact. */
+static void test_injected_faults(void)
+{
+    size_t size = 3 * 65536 + 1234;
+    unsigned char *data = make_input(size);
+    config_t cfg = make_config(in_path, 4096);
+
+    cfg.fault_short = 0.5;
+    cfg.fault_eintr = 0.3;
+    cfg.fault_eagain = 0.3;
+    cfg.fault_delay_us = 5;
+    assert(baseline_run(&cfg) == 0);
+    check_copy(data, size, 4096);
+    free(data);
+}
+
 static void test_overwrites_longer_existing_output(void)
 {
     FILE *f = fopen(out_path, "wb");
@@ -160,6 +176,7 @@ int main(void)
     snprintf(man_path, sizeof man_path, "%s/out.manifest", dir);
 
     test_sizes();
+    test_injected_faults();
     test_overwrites_longer_existing_output();
     test_stdin_input();
     test_errors();

@@ -18,11 +18,11 @@ static void usage(FILE *f)
           "      --in-rate=MB/s         throttle reader\n"
           "      --out-rate=MB/s        throttle writer\n"
           "      --fault-short=P        prob. of short read/write\n"
-          "      --fault-eintr=P        prob. of fake EINTR\n"
-          "      --fault-eagain=P       prob. of fake EAGAIN\n"
+          "      --fault-eintr=P        prob. of fake EINTR (at most 0.99)\n"
+          "      --fault-eagain=P       prob. of fake EAGAIN (at most 0.99)\n"
           "      --fault-delay-us=US    random extra delay per I/O\n"
           "      --fail-worker=P        prob. a worker dies mid-record\n"
-          "      --seed=N               RNG seed\n"
+          "      --seed=N               RNG seed for the faults (default 1)\n"
           "      --manifest=FILE        default OUTPUT.manifest\n"
           "      --metrics=PREFIX       writes PREFIX.summary.csv and PREFIX.occupancy.csv\n"
           "INPUT may be '-' for stdin.\n", f);
@@ -117,8 +117,9 @@ int main(int argc, char **argv)
         case O_IN_RATE:     cfg.in_rate = parse_double(name, optarg, 0, 1e9); break;
         case O_OUT_RATE:    cfg.out_rate = parse_double(name, optarg, 0, 1e9); break;
         case O_F_SHORT:     cfg.fault_short = parse_double(name, optarg, 0, 1); break;
-        case O_F_EINTR:     cfg.fault_eintr = parse_double(name, optarg, 0, 1); break;
-        case O_F_EAGAIN:    cfg.fault_eagain = parse_double(name, optarg, 0, 1); break;
+        /* P = 1 would fail every call, so the copy could never progress. */
+        case O_F_EINTR:     cfg.fault_eintr = parse_double(name, optarg, 0, 0.99); break;
+        case O_F_EAGAIN:    cfg.fault_eagain = parse_double(name, optarg, 0, 0.99); break;
         case O_F_DELAY:     cfg.fault_delay_us = (unsigned)parse_size(name, optarg); break;
         case O_FAIL_WORKER: cfg.fail_worker = parse_double(name, optarg, 0, 1); break;
         case O_SEED:        cfg.seed = (unsigned long)parse_size(name, optarg); break;

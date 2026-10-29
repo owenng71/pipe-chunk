@@ -1,9 +1,10 @@
-/* io.c — read_full / pwrite_full: the only place that calls read/write. */
+/* io.c — read_full / pwrite_full: the only place that calls read/write. Faults are injected here. */
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
 #include <unistd.h>
 
+#include "faults.h"
 #include "io.h"
 #include "metrics.h"
 
@@ -46,8 +47,9 @@ ssize_t read_full(int fd, void *buf, size_t n)
     }
 
     while (got < n) {
+        size_t len = n - got;
         uint64_t t0 = io_clock();
-        ssize_t r = read(fd, p + got, n - got);
+        ssize_t r = faults_before_io(FAULT_READ, &len) < 0 ? -1 : read(fd, p + got, len);
 
         metrics_io_add(io_clock() - t0);
 
@@ -81,8 +83,9 @@ int pwrite_full(int fd, const void *buf, size_t n, off_t off)
     }
 
     while (done < n) {
+        size_t len = n - done;
         uint64_t t0 = io_clock();
-        ssize_t w = pwrite(fd, p + done, n - done, off + (off_t)done);
+        ssize_t w = faults_before_io(FAULT_WRITE, &len) < 0 ? -1 : pwrite(fd, p + done, len, off + (off_t)done);
 
         metrics_io_add(io_clock() - t0);
 

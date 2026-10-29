@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <openssl/sha.h>
 
+#include "faults.h"
 #include "files.h"
 #include "io.h"
 #include "metrics.h"
@@ -19,6 +20,7 @@ int baseline_run(const config_t *cfg)
     uint64_t start = 0, end;
     bool ok = false;
 
+    faults_init(cfg);
     if (files_open(cfg, &f) < 0)
         return 1;
     m = metrics_create(true, cfg->metrics);

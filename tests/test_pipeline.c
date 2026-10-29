@@ -113,6 +113,22 @@ static void test_configurations(void)
     copy_and_check(500000, 4096, 1, 4, true);        // --unbounded
 }
 
+/* Short counts, fake EINTR/EAGAIN and delays on the reader's and writer's I/O: the copy must be exact. */
+static void test_injected_faults(void)
+{
+    size_t size = 3 * 65536 + 1234;
+    unsigned char *data = make_input(size);
+    config_t cfg = make_config(in_path, 4096, 2, 4);
+
+    cfg.fault_short = 0.5;
+    cfg.fault_eintr = 0.3;
+    cfg.fault_eagain = 0.3;
+    cfg.fault_delay_us = 5;
+    assert(pipeline_run(&cfg) == 0);
+    check_copy(data, size, 4096);
+    free(data);
+}
+
 static void test_overwrites_longer_existing_output(void)
 {
     FILE *f = fopen(out_path, "wb");
@@ -202,6 +218,7 @@ int main(void)
     snprintf(metrics_prefix, sizeof metrics_prefix, "%s/m", dir);
 
     test_configurations();
+    test_injected_faults();
     test_overwrites_longer_existing_output();
     test_stdin_input();
     test_metrics_csv();

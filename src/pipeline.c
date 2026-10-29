@@ -7,6 +7,7 @@
 #include <string.h>
 #include <openssl/sha.h>
 
+#include "faults.h"
 #include "files.h"
 #include "io.h"
 #include "metrics.h"
@@ -197,6 +198,7 @@ int pipeline_run(const config_t *cfg)
     uint64_t start = 0, end;
 
     atomic_init(&run.failed, false);
+    faults_init(cfg);
     if (files_open(cfg, &run.files) < 0)
         return 1;
     (void)metrics_now_ns(&start);
