@@ -74,13 +74,17 @@ int files_write_manifest(const config_t *cfg, files_t *f, const record_t *r)
 
 int files_close(const config_t *cfg, files_t *f, bool ok)
 {
+    /* Flush before the slow output fsync: the signal thread is gone, so a Ctrl+C there would drop the buffer. */
+    if (ok && f->manifest != NULL && fflush(f->manifest) != 0) {
+        files_report("write error on", cfg->manifest);
+        ok = false;
+    }
     /* EINVAL from fsync: the fd cannot be synced (e.g. /dev/null), which is not a copy failure. */
     if (ok && f->out >= 0 && fsync(f->out) < 0 && errno != EINVAL) {
         files_report("cannot sync", cfg->output);
         ok = false;
     }
-    if (ok && f->manifest != NULL &&
-        (fflush(f->manifest) != 0 || (fsync(fileno(f->manifest)) < 0 && errno != EINVAL))) {
+    if (ok && f->manifest != NULL && fsync(fileno(f->manifest)) < 0 && errno != EINVAL) {
         files_report("cannot sync", cfg->manifest);
         ok = false;
     }

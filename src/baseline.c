@@ -1,8 +1,10 @@
 /* baseline.c — --mode=blocking: single-threaded read → SHA-256 → pwrite → manifest. */
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <openssl/sha.h>
 
+#include "cancel.h"
 #include "faults.h"
 #include "files.h"
 #include "io.h"
@@ -14,11 +16,12 @@ int baseline_run(const config_t *cfg)
 {
     files_t f;
     metrics_t *m;
+    cancel_t *cancel = NULL;
     metrics_summary_t summary = { 0 };
     ratelimit_t in_rate, out_rate;
     record_t r = { .cap = cfg->block_size };
     uint64_t start = 0, end;
-    bool ok = false;
+    bool ok = false, interrupted;
 
     faults_init(cfg);
     if (files_open(cfg, &f) < 0)
@@ -29,14 +32,22 @@ int baseline_run(const config_t *cfg)
         files_report("cannot set up run for", cfg->input);
         goto done;
     }
+    cancel = cancel_start(NULL, NULL, f.manifest);
+    if (cancel == NULL) {
+        files_report("cannot start signal thread for", cfg->input);
+        goto done;
+    }
     ratelimit_init(&in_rate, cfg->in_rate);
     ratelimit_init(&out_rate, cfg->out_rate);
     (void)metrics_now_ns(&start);
 
     for (;;) {
-        ssize_t n = read_full(f.in, r.buf, cfg->block_size);
+        ssize_t n;
         uint64_t now;
 
+        if (cancel_requested(cancel))
+            break;   // Ctrl+C: finish here, every listed block is complete
+        n = read_full(f.in, r.buf, cfg->block_size);
         if (n < 0) {
             files_report("read error on", cfg->input);
             goto done;
@@ -66,7 +77,11 @@ int baseline_run(const config_t *cfg)
     ok = true;
 
 done:
+    interrupted = cancel_requested(cancel);
+    cancel_stop(cancel);   // before the manifest it may flush is closed
     ok = files_close(cfg, &f, ok) == 0 && ok;
+    if (ok && interrupted)
+        fprintf(stderr, "pipe-chunk: interrupted: %" PRIu64 " blocks written and listed in the manifest\n", summary.blocks);
     free(r.buf);
     if (m != NULL) {
         metrics_thread_unregister();
@@ -79,5 +94,5 @@ done:
         }
         metrics_destroy(m);
     }
-    return ok ? 0 : 1;
+    return !ok ? 1 : interrupted ? 130 : 0;
 }

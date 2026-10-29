@@ -1,10 +1,13 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <openssl/sha.h>
 #include "pipeline.h"
@@ -129,6 +132,63 @@ static void test_injected_faults(void)
     free(data);
 }
 
+static void *send_sigint_later(void *arg)
+{
+    struct timespec ts = { 0, 200 * 1000000 };
+
+    (void)arg;
+    nanosleep(&ts, NULL);
+    kill(getpid(), SIGINT);
+    return NULL;
+}
+
+/*
+ * Ctrl+C mid-run: exit 130, and the manifest lists blocks 0..k-1 exactly once (0 < k < all), each
+ * correct in the output. SIGINT is blocked in this thread too, so only the run's signal thread takes it.
+ */
+static void test_interrupt_drains(void)
+{
+    size_t size = 2000000, block = 4096, nblocks = (size + block - 1) / block, lines = 0, out_size;
+    unsigned char *data = make_input(size), *out;
+    config_t cfg = make_config(in_path, 4096, 2, 4);
+    bool *seen = calloc(nblocks, sizeof(*seen));
+    sigset_t set, old;
+    pthread_t t;
+    FILE *man;
+    uint64_t seq;
+    intmax_t off;
+    size_t len;
+    char hex[65];
+
+    cfg.out_rate = 2;   // about 1 s for the whole file
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    assert(seen != NULL && pthread_sigmask(SIG_BLOCK, &set, &old) == 0);
+    assert(pthread_create(&t, NULL, send_sigint_later, NULL) == 0);
+    assert(pipeline_run(&cfg) == 130);
+    assert(pthread_join(t, NULL) == 0);
+    assert(pthread_sigmask(SIG_SETMASK, &old, NULL) == 0);
+
+    out = slurp(out_path, &out_size);
+    man = fopen(man_path, "r");
+    assert(man != NULL);
+    while (fscanf(man, "%" SCNu64 ",%jd,%zu,%64s\n", &seq, &off, &len, hex) == 4) {
+        assert(seq < nblocks && !seen[seq]);
+        seen[seq] = true;
+        assert((size_t)off == seq * block && len == block);
+        assert((size_t)off + len <= out_size && memcmp(out + off, data + off, len) == 0);
+        lines++;
+    }
+    assert(feof(man));
+    assert(lines > 0 && lines < nblocks);
+    for (size_t i = 0; i < lines; i++)
+        assert(seen[i]);   // every accepted block was finished: a prefix, no holes
+    fclose(man);
+    free(seen);
+    free(out);
+    free(data);
+}
+
 static void test_overwrites_longer_existing_output(void)
 {
     FILE *f = fopen(out_path, "wb");
@@ -219,6 +279,7 @@ int main(void)
 
     test_configurations();
     test_injected_faults();
+    test_interrupt_drains();
     test_overwrites_longer_existing_output();
     test_stdin_input();
     test_metrics_csv();

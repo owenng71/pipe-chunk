@@ -12,8 +12,8 @@ constant when one stage is slower than the others. The copy must stay correct un
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
-> rate limiting and metrics work and are checked end to end in CI. Fault injection, worker-failure
-> recovery and Ctrl+C handling are next. See [Roadmap](#roadmap).
+> rate limiting, metrics and graceful Ctrl+C work and are checked end to end in CI. Fault injection
+> and worker-failure recovery are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -148,6 +148,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] Blocking baseline and end-to-end check in CI
 - [x] Concurrent pipeline with backpressure, `--unbounded` demonstration
 - [x] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
-- [ ] Fault injection, worker supervisor, graceful Ctrl+C, nonblocking stdin, `mmap` input
+- [x] Graceful Ctrl+C: first drains accepted blocks (exit 130), second stops immediately
+- [ ] Fault injection, worker supervisor, nonblocking stdin, `mmap` input
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory

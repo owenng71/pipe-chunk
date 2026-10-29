@@ -1,5 +1,6 @@
 /* pipeline.c — --mode=pipeline: reader → Q1 → N workers (SHA-256) → Q2 → writer. */
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 #include <openssl/sha.h>
 
+#include "cancel.h"
 #include "faults.h"
 #include "files.h"
 #include "io.h"
@@ -22,6 +24,7 @@ typedef struct run {
     pool_t *pool;
     bq_t *q1, *q2;
     metrics_t *metrics;
+    cancel_t *cancel;
     atomic_bool failed;
     /* Writer-owned until it is joined. */
     uint8_t *written;       // bitmap of written seq: a record that arrives twice is dropped
@@ -40,6 +43,18 @@ static void run_fail(run_t *run)
     pool_close(run->pool);
     bq_close(run->q1);
     bq_close(run->q2);
+}
+
+/*
+ * First Ctrl+C (runs in the signal thread): no new records are accepted. Closing Q1 makes the reader's
+ * next push fail; workers and the writer still finish every record already in Q1 or later.
+ * limit: a reader blocked on an idle stdin pipe sees the cancel only when data or EOF arrives.
+ */
+static void run_drain(void *arg)
+{
+    run_t *run = arg;
+
+    bq_close(run->q1);
 }
 
 static void report_thread_error(const char *stage, int err)
@@ -78,7 +93,7 @@ static void *reader_main(void *arg)
         r->len = (size_t)n;
         (void)metrics_now_ns(&r->t_read_ns);
         off += n;
-        if (bq_push(run->q1, r) < 0) {   // closed: the run failed
+        if (bq_push(run->q1, r) < 0) {   // closed: the run failed or was cancelled
             pool_put(run->pool, r);
             break;
         }
@@ -86,7 +101,7 @@ static void *reader_main(void *arg)
         if ((size_t)n < cfg->block_size)
             break;   // read_full is short only at EOF
     }
-    bq_close(run->q1);   // EOF: workers drain Q1 and exit
+    bq_close(run->q1);   // EOF or cancel: workers drain Q1 and exit
     metrics_thread_unregister();
     return NULL;
 }
@@ -190,7 +205,7 @@ int pipeline_run(const config_t *cfg)
     run_t run = { .cfg = cfg };
     pthread_t reader, writer, *workers = NULL;
     int nworkers = 0, rc;
-    bool reader_started = false, writer_started = false, ok;
+    bool reader_started = false, writer_started = false, interrupted = false, ok;
     size_t qcap = cfg->unbounded ? 0 : cfg->queue_cap;
     /* Reader, every Q1 slot, every worker, every Q2 slot and the writer can each hold one tray. */
     size_t trays = cfg->unbounded ? 0 : 2 * cfg->queue_cap + (size_t)cfg->workers + 2;
@@ -209,6 +224,13 @@ int pipeline_run(const config_t *cfg)
     workers = calloc((size_t)cfg->workers, sizeof(*workers));
     if (run.metrics == NULL || run.pool == NULL || run.q1 == NULL || run.q2 == NULL || workers == NULL) {
         files_report("cannot set up pipeline for", cfg->input);
+        atomic_store(&run.failed, true);
+        goto teardown;
+    }
+    /* Before any other thread starts, so every thread inherits the blocked SIGINT/SIGTERM. */
+    run.cancel = cancel_start(run_drain, &run, run.files.manifest);
+    if (run.cancel == NULL) {
+        files_report("cannot start signal thread for", cfg->input);
         atomic_store(&run.failed, true);
         goto teardown;
     }
@@ -241,7 +263,12 @@ int pipeline_run(const config_t *cfg)
     (void)metrics_monitor_stop(run.metrics);
 
 teardown:
+    /* Stop the signal thread before the manifest it may flush is closed. */
+    interrupted = cancel_requested(run.cancel);
+    cancel_stop(run.cancel);
     ok = files_close(cfg, &run.files, !atomic_load(&run.failed)) == 0;
+    if (ok && interrupted)
+        fprintf(stderr, "pipe-chunk: interrupted: %" PRIu64 " blocks written and listed in the manifest\n", run.blocks);
     if (ok) {
         (void)metrics_now_ns(&end);
         summary.bytes = run.bytes;
@@ -258,5 +285,5 @@ teardown:
     metrics_destroy(run.metrics);
     free(workers);
     free(run.written);
-    return ok ? 0 : 1;
+    return !ok ? 1 : interrupted ? 130 : 0;
 }
