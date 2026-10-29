@@ -11,8 +11,9 @@ and records `seq,offset,len,sha256` in a manifest. Bounded queues and a fixed bu
 constant when one stage is slower than the others. The copy must stay correct under partial reads
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
-> **Status: in development.** The blocking baseline (`--mode=blocking`) copies files correctly and
-> is checked end to end in CI; the concurrent pipeline is in progress. See [Roadmap](#roadmap).
+> **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
+> rate limiting and metrics work and are checked end to end in CI. Fault injection, worker-failure
+> recovery and Ctrl+C handling are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -72,9 +73,19 @@ On Windows, use WSL 2 with Ubuntu 24.04 and clone into the Linux home directory,
 
 ```sh
 ./scripts/gen_input.sh 100M /tmp/in.bin                         # random 100 MB test file
-./build/pipe-chunk --mode=blocking -b 64K /tmp/in.bin /tmp/out.bin   # writes out.bin + out.bin.manifest
+./build/pipe-chunk -w 4 -q 16 -b 64K /tmp/in.bin /tmp/out.bin    # writes out.bin + out.bin.manifest
 ./scripts/verify.sh /tmp/in.bin /tmp/out.bin                    # prints VERIFY OK or VERIFY FAIL
 ```
+
+Every run ends with a one-line summary on stderr:
+
+```
+pipe-chunk: 1073741824 bytes in 16384 blocks, 0.507 s, 2118.1 MB/s; latency p50 655 us, p99 1038 us;
+cpu user 0.525 s, sys 0.567 s; peak RSS 7168 KiB; I/O calls 0.408 s
+```
+
+`--metrics=PREFIX` also writes `PREFIX.summary.csv` (the same numbers) and `PREFIX.occupancy.csv`
+(queue sizes sampled every 10 ms).
 
 `verify.sh` passes only if the output is byte-identical to the input and the manifest lists every
 block exactly once with no gaps or overlaps.
@@ -102,7 +113,7 @@ block exactly once with no gaps or overlaps.
 | `make test` | every unit test in `tests/` |
 | `make SAN=thread test` | the same under ThreadSanitizer (data races) |
 | `make SAN=address test` | the same under AddressSanitizer (memory errors and leaks) |
-| `./tests/e2e.sh [BINARY]` | end-to-end copies of real files (100 MiB, empty, uneven sizes, stdin pipe), each checked by `verify.sh` |
+| `./tests/e2e.sh [BINARY]` | end-to-end copies in both modes (100 MiB, empty, uneven sizes, many worker/queue/block settings, unbounded, slow input, stdin pipe), each checked by `verify.sh`, plus a backpressure check: with a slow writer, bounded mode must stay under 32 MB while `--unbounded` grows |
 
 The I/O unit test replaces `read` and `pwrite` with scripted versions to force short counts,
 `EINTR`, `EAGAIN` and zero-byte writes deterministically, and also uses real signals and
@@ -119,9 +130,11 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `src/baseline.c` | single-threaded reference implementation (`--mode=blocking`) |
 | `src/queue.c` | bounded blocking queue: ring buffer, mutex, `not_full`/`not_empty` condition variables |
 | `src/pool.c` | fixed pool of pre-allocated block buffers |
-| `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write` |
+| `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write`; times every call |
+| `src/files.c` | opening input, output and manifest; manifest lines; sync and close |
+| `src/ratelimit.c` | pacing for `--in-rate` / `--out-rate` (slow-device simulation) |
+| `src/metrics.c` | latency percentiles, queue-occupancy monitor thread, CPU, peak RSS, I/O time, CSV |
 | `src/common.h` | `record_t` (one block in transit) and `config_t` (all options) |
-| `src/metrics.h` | metrics interface: latency percentiles, queue occupancy, CPU, memory, I/O time |
 | `tests/` | one `test_<module>.c` per module; plain `main()` with `assert` |
 | `tests/e2e.sh` | end-to-end runs of the binary, each verified |
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
@@ -133,8 +146,8 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] Robust I/O layer (`read_full`, `pwrite_full`)
 - [x] Buffer pool
 - [x] Blocking baseline and end-to-end check in CI
-- [ ] Concurrent pipeline with backpressure, `--unbounded` demonstration
-- [ ] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
+- [x] Concurrent pipeline with backpressure, `--unbounded` demonstration
+- [x] Metrics (throughput, p50/p99 latency, occupancy, CPU, peak RSS) and rate limiting
 - [ ] Fault injection, worker supervisor, graceful Ctrl+C, nonblocking stdin, `mmap` input
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory

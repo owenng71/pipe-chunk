@@ -19,9 +19,6 @@ static void sleep_ms(long ms)
 static void test_create_rejects_bad_sizes(void)
 {
     errno = 0;
-    assert(pool_create(0, 64) == NULL);
-    assert(errno == EINVAL);
-    errno = 0;
     assert(pool_create(4, 0) == NULL);
     assert(errno == EINVAL);
     errno = 0;
@@ -204,6 +201,40 @@ static void test_put_rejects_foreign_and_double_put(void)
     pool_destroy(q);
 }
 
+static void test_unbounded_never_blocks(void)
+{
+    enum { N = 1000, SIZE = 100 };
+    static record_t *r[N];
+    record_t local = { 0 };
+    pool_t *p = pool_create(0, SIZE);
+
+    assert(p != NULL);
+    for (int i = 0; i < N; i++) {   // far past the first chunk: the pool grows instead of waiting
+        r[i] = pool_get(p);
+        assert(r[i] != NULL && r[i]->cap == SIZE);
+        memset(r[i]->buf, i & 0xff, SIZE);
+    }
+    for (int i = 0; i < N; i++) {
+        for (int k = 0; k < SIZE; k++)
+            assert(r[i]->buf[k] == (unsigned char)(i & 0xff));   // buffers never overlap
+    }
+
+    pool_put(p, r[N - 1]);
+    errno = 0;
+    pool_put(p, r[N - 1]);   // double put
+    assert(errno == EINVAL);
+    errno = 0;
+    pool_put(p, &local);
+    assert(errno == EINVAL);
+    assert(pool_get(p) == r[N - 1]);   // a returned tray is reused before growing again
+
+    for (int i = 0; i < N / 2; i++)
+        pool_put(p, r[i]);
+    pool_close(p);
+    assert(pool_get(p) == NULL);
+    pool_destroy(p);   // half the trays still checked out: ASan's leak check covers all chunks
+}
+
 static void test_destroy_with_trays_checked_out(void)
 {
     pool_t *p = pool_create(4, 128);
@@ -274,6 +305,7 @@ int main(void)
     test_get_blocks_until_put();
     test_close_wakes_getters_and_put_still_works();
     test_put_rejects_foreign_and_double_put();
+    test_unbounded_never_blocks();
     test_destroy_with_trays_checked_out();
     test_stress_one_owner_per_tray();
     return 0;

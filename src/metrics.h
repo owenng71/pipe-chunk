@@ -27,7 +27,7 @@ typedef struct metrics_summary {
 /* Writes a CLOCK_MONOTONIC timestamp to caller-owned storage without shared locking; returns 0 or -1 with errno. */
 int metrics_now_ns(uint64_t *out_ns);
 
-/* Returns a context owned by the caller; construction needs no caller lock and returns NULL with errno on failure. */
+/* Returns a context owned by the caller; NULL prefix = no CSV files and no occupancy monitor. Returns NULL with errno on failure. */
 metrics_t *metrics_create(bool enabled, const char *prefix);
 
 /* Registers caller-thread state owned by m under the registry lock; returns 0 or -1 with the failure in errno. */

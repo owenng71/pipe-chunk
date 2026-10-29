@@ -5,6 +5,16 @@
 #include <unistd.h>
 
 #include "io.h"
+#include "metrics.h"
+
+/* Time spent inside each read/pwrite/poll call goes to the calling thread's metrics (no-op if none). */
+static uint64_t io_clock(void)
+{
+    uint64_t t = 0;
+
+    (void)metrics_now_ns(&t);   // clock_gettime does not touch errno on success
+    return t;
+}
 
 /* Sleep until fd is ready for `events`. Returns 0, or -1 with errno set. */
 static int wait_ready(int fd, short events)
@@ -12,7 +22,10 @@ static int wait_ready(int fd, short events)
     struct pollfd pfd = { .fd = fd, .events = events };
 
     for (;;) {
+        uint64_t t0 = io_clock();
         int rc = poll(&pfd, 1, -1);
+
+        metrics_io_add(io_clock() - t0);
 
         if (rc > 0)
             return 0;   // ready, or POLLERR/POLLHUP: the next call reports it
@@ -33,7 +46,10 @@ ssize_t read_full(int fd, void *buf, size_t n)
     }
 
     while (got < n) {
+        uint64_t t0 = io_clock();
         ssize_t r = read(fd, p + got, n - got);
+
+        metrics_io_add(io_clock() - t0);
 
         if (r > 0) {
             got += (size_t)r;
@@ -65,7 +81,10 @@ int pwrite_full(int fd, const void *buf, size_t n, off_t off)
     }
 
     while (done < n) {
+        uint64_t t0 = io_clock();
         ssize_t w = pwrite(fd, p + done, n - done, off + (off_t)done);
+
+        metrics_io_add(io_clock() - t0);
 
         if (w > 0) {
             done += (size_t)w;

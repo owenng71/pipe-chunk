@@ -3,8 +3,11 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "queue.h"
+
+enum { UNBOUNDED_INITIAL_CAPACITY = 64 };
 
 struct bq {
     pthread_mutex_t mutex;
@@ -14,20 +17,42 @@ struct bq {
     size_t capacity;
     size_t head;
     size_t count;
+    bool unbounded;   // capacity grows instead of blocking producers (--unbounded demo)
     bool closed;
 };
+
+/* Doubles an unbounded queue's ring. Called with the mutex held; returns 0 or -1 with errno. */
+static int bq_grow(bq_t *queue)
+{
+    size_t capacity = queue->capacity;
+    size_t first = capacity - queue->head;   // items from head to the end of the ring
+    record_t **items;
+
+    if (capacity > SIZE_MAX / 2 / sizeof(*items)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    items = malloc(2 * capacity * sizeof(*items));
+    if (items == NULL)
+        return -1;
+    memcpy(items, queue->items + queue->head, first * sizeof(*items));
+    memcpy(items + first, queue->items, (queue->count - first) * sizeof(*items));
+    free(queue->items);
+    queue->items = items;
+    queue->capacity = 2 * capacity;
+    queue->head = 0;
+    return 0;
+}
 
 bq_t *bq_create(size_t capacity)
 {
     bq_t *queue;
     int saved_errno = errno;
+    bool unbounded = capacity == 0;
     int rc;
 
-    if (capacity == 0) {
-        // limit: 0 = unbounded (--unbounded) is not implemented yet
-        errno = EINVAL;
-        return NULL;
-    }
+    if (unbounded)
+        capacity = UNBOUNDED_INITIAL_CAPACITY;
     if (capacity > SIZE_MAX / sizeof(*queue->items)) {
         errno = EOVERFLOW;
         return NULL;
@@ -74,6 +99,7 @@ bq_t *bq_create(size_t capacity)
     }
 
     queue->capacity = capacity;
+    queue->unbounded = unbounded;
     errno = saved_errno;
     return queue;
 }
@@ -94,6 +120,13 @@ int bq_push(bq_t *queue, record_t *record)
         return -1;
     }
 
+    if (queue->count == queue->capacity && queue->unbounded && !queue->closed &&
+        bq_grow(queue) < 0) {
+        rc = errno;
+        (void)pthread_mutex_unlock(&queue->mutex);
+        errno = rc;
+        return -1;
+    }
     while (queue->count == queue->capacity && !queue->closed) {
         rc = pthread_cond_wait(&queue->not_full, &queue->mutex);
         if (rc != 0) {

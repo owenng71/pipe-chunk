@@ -502,11 +502,32 @@ static void test_fifo_close_and_errno(void)
     assert(errno == EDOM);
 }
 
-static void test_zero_capacity_rejected(void)
+static void test_zero_capacity_is_unbounded(void)
 {
-    errno = 0;
-    assert(bq_create(0) == NULL);
-    assert(errno == EINVAL);
+    enum { N = 1000 };
+    static record_t records[N];
+    bq_t *q = bq_create(0);
+    record_t *out;
+
+    assert(q != NULL);
+    /* Interleave pops so the ring wraps before it grows: order must survive the resize. */
+    for (unsigned i = 0; i < 40; i++)
+        assert(bq_push(q, &records[i]) == 0);
+    for (unsigned i = 0; i < 30; i++) {
+        assert(bq_pop(q, &out) == 1);
+        assert(out == &records[i]);
+    }
+    for (unsigned i = 40; i < N; i++)
+        assert(bq_push(q, &records[i]) == 0);   // never blocks
+    assert(bq_size(q) == N - 30);
+    for (unsigned i = 30; i < N; i++) {
+        assert(bq_pop(q, &out) == 1);
+        assert(out == &records[i]);
+    }
+    bq_close(q);
+    assert(bq_push(q, &records[0]) == -1);
+    assert(bq_pop(q, &out) == 0);
+    bq_destroy(q);
 }
 
 static void test_destroy_does_not_free_queued_record(void)
@@ -524,7 +545,7 @@ static void test_destroy_does_not_free_queued_record(void)
 int main(void)
 {
     test_fifo_close_and_errno();
-    test_zero_capacity_rejected();
+    test_zero_capacity_is_unbounded();
     test_destroy_does_not_free_queued_record();
     test_blocked_producers_resume_and_close();
     test_blocked_consumers_resume_and_close();
