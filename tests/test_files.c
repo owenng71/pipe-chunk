@@ -159,6 +159,33 @@ static void test_stdin_file_is_left_alone(void)
     restore_stdin(saved);
 }
 
+/* --io=mmap: blocks point into the mapping (no copy), the last one is short, then EOF. */
+static void test_mmap_read(void)
+{
+    config_t cfg = make_config();
+    files_t f;
+    unsigned char own[4096];
+    record_t r = { .buf = own, .cap = sizeof own };
+
+    cfg.io = IO_MMAP;
+    write_text(in_path, "0123456789");
+    assert(files_open(&cfg, &f) == 0);
+    assert(f.map != NULL && f.map_len == 10);
+    assert(files_read(&cfg, &f, &r, 0, 4) == 4 && r.buf == f.map && memcmp(r.buf, "0123", 4) == 0);
+    assert(files_read(&cfg, &f, &r, 8, 4) == 2 && r.buf == f.map + 8 && memcmp(r.buf, "89", 2) == 0);
+    assert(files_read(&cfg, &f, &r, 10, 4) == 0);
+    assert(files_close(&cfg, &f, true) == 0 && f.map == NULL);
+
+    write_text(in_path, "");   // an empty file cannot be mapped; it just has no blocks
+    assert(files_open(&cfg, &f) == 0 && f.map == NULL);
+    assert(files_read(&cfg, &f, &r, 0, 4) == 0);
+    assert(files_close(&cfg, &f, true) == 0);
+
+    cfg.input = "/dev/zero";   // not a regular file
+    assert(files_open(&cfg, &f) == -1);
+    assert(f.in == -1 && f.out == -1 && f.manifest == NULL);
+}
+
 int main(void)
 {
     assert(mkdtemp(dir) != NULL);
@@ -171,6 +198,7 @@ int main(void)
     test_dev_null_output_is_allowed();
     test_stdin_pipe_is_nonblocking_while_open();
     test_stdin_file_is_left_alone();
+    test_mmap_read();
 
     unlink(in_path);
     unlink(out_path);

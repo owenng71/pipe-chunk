@@ -92,7 +92,7 @@ static void *reader_main(void *arg)
 
         if (r == NULL)
             break;   // pool closed: the run failed
-        n = read_full(run->files.in, r->buf, cfg->block_size);
+        n = files_read(cfg, &run->files, r, off, cfg->block_size);
         if (n <= 0) {
             if (n < 0) {
                 files_report("read error on", cfg->input);
@@ -114,7 +114,7 @@ static void *reader_main(void *arg)
         }
         /* r now belongs to Q1 and must not be touched. */
         if ((size_t)n < cfg->block_size)
-            break;   // read_full is short only at EOF
+            break;   // files_read is short only at EOF
     }
     bq_close(run->q1);   // EOF or cancel: workers drain Q1 and exit
     metrics_thread_unregister();

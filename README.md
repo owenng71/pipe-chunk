@@ -12,8 +12,8 @@ constant when one stage is slower than the others. The copy must stay correct un
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
-> rate limiting, metrics, I/O fault injection, worker-failure recovery, graceful Ctrl+C
-> and nonblocking stdin input are checked in CI. `mmap` input is next. See [Roadmap](#roadmap).
+> rate limiting, metrics, I/O fault injection, worker-failure recovery, graceful Ctrl+C,
+> nonblocking stdin input and `mmap` input are checked in CI. The CI fault matrix and benchmarks are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -41,6 +41,7 @@ pointer moves between stages, never the data:
 | `bq_push(Q1)` / `bq_pop(Q1)` | reader → Q1 → worker |
 | `bq_push(Q2)` / `bq_pop(Q2)` | worker → Q2 → writer |
 | `pool_put()` after `pwrite` + manifest line | writer → pool |
+| `--io=mmap`: reader points `buf` into the mapped input instead of reading into the tray | data is never copied; `pool_get` gives the tray its own buffer back |
 | worker dies holding a block | supervisor → replacement worker (retry, at most `MAX_ATTEMPTS` tries) |
 
 **Correctness without reordering.** Workers finish out of order. The writer uses `pwrite` at each
@@ -53,6 +54,12 @@ Ctrl+C stops immediately.
 
 **Robust I/O.** Every `read`/`write` goes through one module (`io.c`) that retries short counts,
 `EINTR` and `EAGAIN`. Fault injection (`--fault-*`, `--fail-worker`) forces those paths in tests.
+
+**`mmap` input.** With `--io=mmap` the input file is mapped once, read-only, and each block points
+into the mapping, so workers hash and the writer `pwrite`s with no copy. Trays still limit how many
+blocks are in flight. Peak RSS includes the mapped file pages that were touched (clean page cache the
+kernel can drop), so it reaches the file size even though backpressure still holds. If another
+program truncates the input mid-copy, the process gets `SIGBUS`; `read()` would only see an early EOF.
 
 ---
 
@@ -96,7 +103,7 @@ block exactly once with no gaps or overlaps.
 | `-q, --queue=N` | capacity of Q1 and Q2 (default 16) |
 | `-w, --workers=N` | worker threads (default 4) |
 | `--mode=blocking\|pipeline` | single-threaded baseline, or the concurrent pipeline (default) |
-| `--io=rw\|mmap` | read input with `read()` into pool buffers, or `mmap` it |
+| `--io=rw\|mmap` | read input with `read()` into pool buffers, or `mmap` it and hash and write straight from the mapping (regular files only) |
 | `--unbounded` | disable backpressure (memory-growth demonstration) |
 | `--in-rate`, `--out-rate=MB/s` | throttle the reader or the writer |
 | `--fault-short`, `--fault-eintr`, `--fault-eagain=P` | inject short I/O, `EINTR`, `EAGAIN` with probability P |
@@ -133,7 +140,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `src/queue.c` | bounded blocking queue: ring buffer, mutex, `not_full`/`not_empty` condition variables |
 | `src/pool.c` | fixed pool of pre-allocated block buffers |
 | `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write`; times every call |
-| `src/files.c` | opening input (nonblocking stdin pipe), output and manifest; manifest lines; sync and close |
+| `src/files.c` | opening input (nonblocking stdin pipe or `mmap`), output and manifest; block reads; manifest lines; sync and close |
 | `src/seqset.c` | growable bitmap of written block numbers: the writer drops a repeated block |
 | `src/faults.c` | fault injection for `io.c` (`--fault-*`, `--seed`) |
 | `src/cancel.c` | `sigwait` signal thread: first Ctrl+C drains, second stops at once |
@@ -157,6 +164,6 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] I/O fault injection (short counts, `EINTR`, `EAGAIN`, delays) with `--seed`
 - [x] Worker supervisor: dead workers replaced, their block retried (`--fail-worker`)
 - [x] Nonblocking stdin pipe input (`O_NONBLOCK` + `poll()`)
-- [ ] `mmap` input
+- [x] `mmap` input: zero-copy, blocks point into the mapping
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory

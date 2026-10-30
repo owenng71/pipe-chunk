@@ -15,11 +15,13 @@
 static char dir[] = "/tmp/test_pipeline_XXXXXX";
 static char in_path[64], out_path[64], man_path[64], metrics_prefix[64];
 
+static io_kind_t io_kind = IO_RW;   // main() reruns the file copies with IO_MMAP
+
 static config_t make_config(const char *input, size_t block_size, size_t queue_cap, int workers)
 {
     return (config_t){ .input = input, .output = out_path, .manifest = man_path,
                        .block_size = block_size, .queue_cap = queue_cap, .workers = workers,
-                       .mode = MODE_PIPELINE, .io = IO_RW, .seed = 1 };
+                       .mode = MODE_PIPELINE, .io = io_kind, .seed = 1 };
 }
 
 static unsigned char *make_input(size_t size)
@@ -345,6 +347,22 @@ static void test_errors_stop_cleanly(void)
     free(data);
 }
 
+/* --io=mmap needs a regular file: stdin and a device are refused before anything is copied. */
+static void test_mmap_refuses_non_files(void)
+{
+    config_t cfg = make_config("-", 4096, 4, 4);
+    int saved = dup(STDIN_FILENO), fd = open(in_path, O_RDONLY);
+
+    assert(saved >= 0 && fd >= 0);
+    assert(dup2(fd, STDIN_FILENO) == STDIN_FILENO);   // even a regular file behind stdin
+    close(fd);
+    assert(pipeline_run(&cfg) == 1);
+    assert(dup2(saved, STDIN_FILENO) == STDIN_FILENO);
+    close(saved);
+    cfg.input = "/dev/zero";
+    assert(pipeline_run(&cfg) == 1);
+}
+
 int main(void)
 {
     assert(mkdtemp(dir) != NULL);
@@ -362,6 +380,13 @@ int main(void)
     test_stdin_slow_pipe();
     test_metrics_csv();
     test_errors_stop_cleanly();
+
+    io_kind = IO_MMAP;   // same copies; blocks now point into the mapping
+    test_configurations();
+    test_injected_faults();
+    test_worker_failures();
+    test_interrupt_drains();
+    test_mmap_refuses_non_files();
 
     unlink(in_path);
     unlink(out_path);

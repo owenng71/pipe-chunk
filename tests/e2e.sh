@@ -43,6 +43,7 @@ run       "blocking, empty input"               0         --mode=blocking
 run       "blocking, 4 KiB blocks, uneven"      1000001   --mode=blocking -b 4K
 run       "blocking, 1 MiB blocks"              10M       --mode=blocking -b 1M
 run_stdin "blocking, stdin pipe"                5000001   --mode=blocking
+run       "blocking, mmap input"                10000001  --mode=blocking --io=mmap
 
 run       "pipeline, 100 MiB + 1 byte"          104857601
 run       "pipeline, empty input"               0
@@ -52,6 +53,8 @@ run       "pipeline, 1 MiB blocks"              10M       -b 1M
 run       "pipeline, unbounded"                 10000001  --unbounded
 run       "pipeline, slow input"                2000000   --in-rate=20
 run_stdin "pipeline, stdin pipe"                5000001   -w 4
+run       "pipeline, mmap input"                104857601 --io=mmap
+run       "pipeline, mmap, empty input"         0         --io=mmap
 
 # Backpressure: with a slow writer (64 MB at 32 MB/s) the bounded pipeline holds at most
 # 2*4 + 4 + 2 = 14 blocks of 64 KiB; --unbounded keeps reading and buffers most of the file.

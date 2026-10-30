@@ -3,10 +3,12 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "files.h"
+#include "io.h"
 
 void files_report(const char *what, const char *path)
 {
@@ -43,6 +45,40 @@ static int make_stdin_nonblocking(files_t *f)
     return 0;
 }
 
+/*
+ * --io=mmap: map the whole input once, read-only. Only a regular file named by path has a fixed
+ * size to map; an empty one cannot be mapped (EINVAL) and simply has no blocks.
+ * limit: if another program truncates the input during the run, touching the lost pages raises
+ * SIGBUS and the process dies; read() would just see an early EOF.
+ */
+static int map_input(const config_t *cfg, files_t *f)
+{
+    struct stat st;
+
+    if (from_stdin(cfg)) {   // even a redirected file: its read position need not be 0
+        fprintf(stderr, "pipe-chunk: --io=mmap cannot read stdin; give the input file's path\n");
+        return -1;
+    }
+    if (fstat(f->in, &st) < 0) {
+        files_report("cannot stat input", cfg->input);
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "pipe-chunk: --io=mmap needs a regular file as input: %s\n", cfg->input);
+        return -1;
+    }
+    if (st.st_size == 0)
+        return 0;
+    f->map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, f->in, 0);
+    if (f->map == MAP_FAILED) {
+        f->map = NULL;
+        files_report("cannot mmap input", cfg->input);
+        return -1;
+    }
+    f->map_len = (size_t)st.st_size;
+    return 0;
+}
+
 int files_open(const config_t *cfg, files_t *f)
 {
     struct stat in_st, out_st;
@@ -57,6 +93,8 @@ int files_open(const config_t *cfg, files_t *f)
         files_report("cannot make nonblocking", "stdin");
         goto fail;
     }
+    if (cfg->io == IO_MMAP && map_input(cfg, f) < 0)
+        goto fail;
     f->out = open(cfg->output, O_WRONLY | O_CREAT, 0644);
     if (f->out < 0) {
         files_report("cannot open output", cfg->output);
@@ -82,6 +120,20 @@ int files_open(const config_t *cfg, files_t *f)
 fail:
     (void)files_close(cfg, f, false);
     return -1;
+}
+
+ssize_t files_read(const config_t *cfg, files_t *f, record_t *r, off_t off, size_t n)
+{
+    size_t left;
+
+    if (cfg->io != IO_MMAP)
+        return read_full(f->in, r->buf, n);
+    left = (size_t)off < f->map_len ? f->map_len - (size_t)off : 0;
+    if (n > left)
+        n = left;   // EOF
+    if (n > 0)
+        r->buf = f->map + off;   // no copy: the worker hashing it is the first to touch (fault in) the pages
+    return (ssize_t)n;
 }
 
 int files_write_manifest(const config_t *cfg, files_t *f, const record_t *r)
@@ -128,6 +180,8 @@ int files_close(const config_t *cfg, files_t *f, bool ok)
     // limit: the hard stop's _exit(130) skips this, leaving a stdin pipe nonblocking (only we read it)
     if (f->in_flags >= 0)
         (void)fcntl(f->in, F_SETFL, f->in_flags);   // best effort: the copy itself is already done
+    if (f->map != NULL)
+        (void)munmap(f->map, f->map_len);   // every stage has stopped: no record points into it any more
     if (f->in >= 0 && !from_stdin(cfg))
         close(f->in);
     *f = (files_t){ .in = -1, .out = -1, .manifest = NULL, .in_flags = -1 };

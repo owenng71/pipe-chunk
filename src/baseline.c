@@ -20,6 +20,7 @@ int baseline_run(const config_t *cfg)
     metrics_summary_t summary = { 0 };
     ratelimit_t in_rate, out_rate;
     record_t r = { .cap = cfg->block_size };
+    unsigned char *own = NULL;   // r.buf may be repointed into the --io=mmap mapping
     uint64_t start = 0, end;
     bool ok = false, interrupted;
 
@@ -27,8 +28,8 @@ int baseline_run(const config_t *cfg)
     if (files_open(cfg, &f) < 0)
         return 1;
     m = metrics_create(true, cfg->metrics);
-    r.buf = malloc(cfg->block_size);
-    if (m == NULL || r.buf == NULL || metrics_thread_register(m) < 0) {
+    r.buf = own = malloc(cfg->block_size);
+    if (m == NULL || own == NULL || metrics_thread_register(m) < 0) {
         files_report("cannot set up run for", cfg->input);
         goto done;
     }
@@ -47,7 +48,7 @@ int baseline_run(const config_t *cfg)
 
         if (cancel_requested(cancel))
             break;   // Ctrl+C: finish here, every listed block is complete
-        n = read_full(f.in, r.buf, cfg->block_size);
+        n = files_read(cfg, &f, &r, r.offset, cfg->block_size);
         if (n < 0) {
             files_report("read error on", cfg->input);
             goto done;
@@ -72,7 +73,7 @@ int baseline_run(const config_t *cfg)
         r.seq++;
         r.offset += n;
         if (r.len < cfg->block_size)
-            break;   // read_full is short only at EOF
+            break;   // files_read is short only at EOF
     }
     ok = true;
 
@@ -82,7 +83,7 @@ done:
     ok = files_close(cfg, &f, ok) == 0 && ok;
     if (ok && interrupted)
         fprintf(stderr, "pipe-chunk: interrupted: %" PRIu64 " blocks written and listed in the manifest\n", summary.blocks);
-    free(r.buf);
+    free(own);
     if (m != NULL) {
         metrics_thread_unregister();
         if (ok) {
