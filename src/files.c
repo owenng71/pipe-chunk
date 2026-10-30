@@ -18,14 +18,43 @@ static bool from_stdin(const config_t *cfg)
     return strcmp(cfg->input, "-") == 0;
 }
 
+/*
+ * A pipe or socket on stdin becomes nonblocking, so a slow producer shows up as EAGAIN + poll.
+ * A terminal is left alone: it shares its open file description with the shell, which would stay
+ * nonblocking if the hard stop's _exit skipped files_close. Regular files ignore O_NONBLOCK.
+ */
+static int make_stdin_nonblocking(files_t *f)
+{
+    struct stat st;
+    int flags;
+
+    if (fstat(f->in, &st) < 0)
+        return -1;
+    if (!S_ISFIFO(st.st_mode) && !S_ISSOCK(st.st_mode))
+        return 0;
+    flags = fcntl(f->in, F_GETFL);
+    if (flags < 0)
+        return -1;
+    if (flags & O_NONBLOCK)
+        return 0;   // already nonblocking: nothing to restore
+    if (fcntl(f->in, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+    f->in_flags = flags;
+    return 0;
+}
+
 int files_open(const config_t *cfg, files_t *f)
 {
     struct stat in_st, out_st;
 
-    *f = (files_t){ .in = -1, .out = -1, .manifest = NULL };
+    *f = (files_t){ .in = -1, .out = -1, .manifest = NULL, .in_flags = -1 };
     f->in = from_stdin(cfg) ? STDIN_FILENO : open(cfg->input, O_RDONLY);
     if (f->in < 0) {
         files_report("cannot open input", cfg->input);
+        goto fail;
+    }
+    if (from_stdin(cfg) && make_stdin_nonblocking(f) < 0) {
+        files_report("cannot make nonblocking", "stdin");
         goto fail;
     }
     f->out = open(cfg->output, O_WRONLY | O_CREAT, 0644);
@@ -96,8 +125,11 @@ int files_close(const config_t *cfg, files_t *f, bool ok)
         files_report("cannot close", cfg->output);
         ok = false;
     }
+    // limit: the hard stop's _exit(130) skips this, leaving a stdin pipe nonblocking (only we read it)
+    if (f->in_flags >= 0)
+        (void)fcntl(f->in, F_SETFL, f->in_flags);   // best effort: the copy itself is already done
     if (f->in >= 0 && !from_stdin(cfg))
         close(f->in);
-    *f = (files_t){ .in = -1, .out = -1, .manifest = NULL };
+    *f = (files_t){ .in = -1, .out = -1, .manifest = NULL, .in_flags = -1 };
     return ok ? 0 : -1;
 }

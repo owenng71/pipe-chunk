@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,80 @@ static void test_dev_null_output_is_allowed(void)
     assert(files_close(&cfg, &f, true) == 0);
 }
 
+static bool stdin_nonblocking(void)
+{
+    int flags = fcntl(STDIN_FILENO, F_GETFL);
+
+    assert(flags >= 0);
+    return (flags & O_NONBLOCK) != 0;
+}
+
+/* Puts fd on stdin; returns a dup of the old stdin to hand to restore_stdin. */
+static int replace_stdin(int fd)
+{
+    int saved = dup(STDIN_FILENO);
+
+    assert(saved >= 0);
+    assert(dup2(fd, STDIN_FILENO) == STDIN_FILENO);
+    close(fd);
+    return saved;
+}
+
+static void restore_stdin(int saved)
+{
+    assert(dup2(saved, STDIN_FILENO) == STDIN_FILENO);
+    close(saved);
+}
+
+static void test_stdin_pipe_is_nonblocking_while_open(void)
+{
+    config_t cfg = make_config();
+    files_t f;
+    int p[2], saved;
+
+    cfg.input = "-";
+    assert(pipe(p) == 0);
+    saved = replace_stdin(p[0]);
+    assert(!stdin_nonblocking());
+    assert(files_open(&cfg, &f) == 0);
+    assert(f.in == STDIN_FILENO && stdin_nonblocking());
+    assert(files_close(&cfg, &f, true) == 0);
+    assert(!stdin_nonblocking());                  // original flags restored
+    assert(fcntl(STDIN_FILENO, F_GETFD) >= 0);     // stdin is not closed
+
+    /* Already nonblocking before the run: stays that way. */
+    assert(fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK) == 0);
+    assert(files_open(&cfg, &f) == 0);
+    assert(files_close(&cfg, &f, true) == 0);
+    assert(stdin_nonblocking());
+
+    /* Restored on the failure path too. */
+    assert(fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) & ~O_NONBLOCK) == 0);
+    cfg.manifest = "/nonexistent/dir/manifest";
+    assert(files_open(&cfg, &f) == -1);
+    assert(!stdin_nonblocking());
+
+    restore_stdin(saved);
+    close(p[1]);
+}
+
+static void test_stdin_file_is_left_alone(void)
+{
+    config_t cfg = make_config();
+    files_t f;
+    int fd, saved;
+
+    write_text(in_path, "input");
+    fd = open(in_path, O_RDONLY);
+    assert(fd >= 0);
+    saved = replace_stdin(fd);
+    cfg.input = "-";
+    assert(files_open(&cfg, &f) == 0);
+    assert(!stdin_nonblocking() && f.in_flags == -1);
+    assert(files_close(&cfg, &f, true) == 0);
+    restore_stdin(saved);
+}
+
 int main(void)
 {
     assert(mkdtemp(dir) != NULL);
@@ -94,6 +169,8 @@ int main(void)
     test_manifest_line_format();
     test_open_failures_close_everything();
     test_dev_null_output_is_allowed();
+    test_stdin_pipe_is_nonblocking_while_open();
+    test_stdin_file_is_left_alone();
 
     unlink(in_path);
     unlink(out_path);

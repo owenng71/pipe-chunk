@@ -12,8 +12,8 @@ constant when one stage is slower than the others. The copy must stay correct un
 and writes, interrupted system calls, a slow output device, a crashing worker and Ctrl+C.
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
-> rate limiting, metrics, I/O fault injection, worker-failure recovery and graceful Ctrl+C work and
-> are checked in CI. Nonblocking stdin and `mmap` input are next. See [Roadmap](#roadmap).
+> rate limiting, metrics, I/O fault injection, worker-failure recovery, graceful Ctrl+C
+> and nonblocking stdin input are checked in CI. `mmap` input is next. See [Roadmap](#roadmap).
 
 ---
 
@@ -103,7 +103,9 @@ block exactly once with no gaps or overlaps.
 | `--fault-delay-us=US`, `--fail-worker=P`, `--seed=N` | extra I/O delay, worker crashes, reproducible fault runs |
 | `--manifest=FILE`, `--metrics=PREFIX` | manifest path; write summary and queue-occupancy CSVs |
 
-`INPUT` may be `-` to read from a pipe on stdin (nonblocking, with `poll()`). Run
+`INPUT` may be `-` to read from stdin. A pipe or socket on stdin is switched to `O_NONBLOCK` for the
+run: when the producer is slow, `read` returns `EAGAIN` and the reader waits in `poll()`. The
+original flags are restored at the end. A terminal or redirected file is read as it is. Run
 `./build/pipe-chunk --help` for the full list.
 
 ## Testing
@@ -131,7 +133,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `src/queue.c` | bounded blocking queue: ring buffer, mutex, `not_full`/`not_empty` condition variables |
 | `src/pool.c` | fixed pool of pre-allocated block buffers |
 | `src/io.c` | `read_full` / `pwrite_full`, the only place that calls `read`/`write`; times every call |
-| `src/files.c` | opening input, output and manifest; manifest lines; sync and close |
+| `src/files.c` | opening input (nonblocking stdin pipe), output and manifest; manifest lines; sync and close |
 | `src/seqset.c` | growable bitmap of written block numbers: the writer drops a repeated block |
 | `src/faults.c` | fault injection for `io.c` (`--fault-*`, `--seed`) |
 | `src/cancel.c` | `sigwait` signal thread: first Ctrl+C drains, second stops at once |
@@ -154,6 +156,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] Graceful Ctrl+C: first drains accepted blocks (exit 130), second stops immediately
 - [x] I/O fault injection (short counts, `EINTR`, `EAGAIN`, delays) with `--seed`
 - [x] Worker supervisor: dead workers replaced, their block retried (`--fail-worker`)
-- [ ] Nonblocking stdin, `mmap` input
+- [x] Nonblocking stdin pipe input (`O_NONBLOCK` + `poll()`)
+- [ ] `mmap` input
 - [ ] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory

@@ -207,6 +207,53 @@ static void test_stdin_input(void)
     free(data);
 }
 
+struct trickle {
+    int fd;
+    const unsigned char *data;
+    size_t size;
+};
+
+/* Feeds the pipe in 1000-byte pieces with pauses, so the run's reader keeps hitting EAGAIN. */
+static void *trickle_writer(void *arg)
+{
+    struct trickle *t = arg;
+    struct timespec pause = { 0, 300 * 1000 };
+
+    for (size_t off = 0; off < t->size; off += 1000) {
+        size_t len = t->size - off < 1000 ? t->size - off : 1000;
+
+        assert(write(t->fd, t->data + off, len) == (ssize_t)len);
+        nanosleep(&pause, NULL);
+    }
+    close(t->fd);   // EOF for the reader
+    return NULL;
+}
+
+/* Input arrives slowly through a pipe on stdin: the nonblocking EAGAIN + poll path, then EOF. */
+static void test_stdin_slow_pipe(void)
+{
+    size_t size = 70001;
+    unsigned char *data = make_input(size);
+    config_t cfg = make_config("-", 4096);
+    int p[2], saved = dup(STDIN_FILENO), flags;
+    struct trickle t;
+    pthread_t th;
+
+    assert(saved >= 0 && pipe(p) == 0);
+    assert(dup2(p[0], STDIN_FILENO) == STDIN_FILENO);
+    close(p[0]);
+    t = (struct trickle){ .fd = p[1], .data = data, .size = size };
+    assert(pthread_create(&th, NULL, trickle_writer, &t) == 0);
+    assert(baseline_run(&cfg) == 0);
+    assert(pthread_join(th, NULL) == 0);
+    flags = fcntl(STDIN_FILENO, F_GETFL);
+    assert(flags >= 0 && !(flags & O_NONBLOCK));   // restored after the run
+    assert(dup2(saved, STDIN_FILENO) == STDIN_FILENO);
+    close(saved);
+    check_copy(data, size, 4096);
+    free(data);
+}
+
 static void test_errors(void)
 {
     size_t size;
@@ -240,6 +287,7 @@ int main(void)
     test_interrupt_drains();
     test_overwrites_longer_existing_output();
     test_stdin_input();
+    test_stdin_slow_pipe();
     test_errors();
 
     unlink(in_path);
