@@ -214,7 +214,7 @@ static void test_unbounded_never_blocks(void)
     pool_t *p = pool_create(0, SIZE);
 
     assert(p != NULL);
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++) {   // far past the first index table: the pool grows instead of waiting
         r[i] = pool_get(p);
         assert(r[i] != NULL && r[i]->buf != NULL && r[i]->cap == SIZE);
         assert(r[i]->seq == 0 && r[i]->offset == 0 && r[i]->len == 0);
@@ -229,7 +229,7 @@ static void test_unbounded_never_blocks(void)
         for (int j = i + 1; j < N; j++) {
             uintptr_t b = (uintptr_t)r[j]->buf;
 
-            assert(a < b ? b - a >= SIZE : a - b >= SIZE);
+            assert(a < b ? b - a >= SIZE : a - b >= SIZE);   // buffers never overlap
         }
         for (int k = 0; k < SIZE; k++)
             assert(r[i]->buf[k] == (unsigned char)(i & 0xff));
@@ -242,15 +242,15 @@ static void test_unbounded_never_blocks(void)
     memset(r[0]->sha, 0xa5, sizeof(r[0]->sha));
     r[0]->t_read_ns = 123456;
     r[0]->attempts = 2;
-    r[0]->buf = other;
+    r[0]->buf = other;   // a worker may repoint buf (mmap mode); pool_get must restore it
     r[0]->cap = sizeof(other);
 
     pool_put(p, r[0]);
     errno = 0;
-    pool_put(p, r[0]);
+    pool_put(p, r[0]);   // double put
     assert(errno == EINVAL);
     reused = pool_get(p);
-    assert(reused == r[0]);
+    assert(reused == r[0]);   // a returned tray is reused before growing again
     assert(reused->buf == original_buf && reused->cap == SIZE);
     assert(reused->seq == 0 && reused->offset == 0 && reused->len == 0);
     for (size_t k = 0; k < sizeof(reused->sha); k++)
@@ -272,7 +272,7 @@ static void test_unbounded_never_blocks(void)
     pool_close(p);
     pool_put(p, r[N / 2]);   // valid returns remain accepted after close
     assert(pool_get(p) == NULL);
-    pool_destroy(p);   // checked-out trays are reclaimed through the pool's owner registry
+    pool_destroy(p);   // half the trays still checked out: ASan's leak check covers the whole index
 }
 
 static void test_destroy_with_trays_checked_out(void)
