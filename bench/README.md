@@ -1,80 +1,61 @@
-# Benchmark result contract (W3-01)
+# W3-01 Result Schema Contract
 
-`sweep.sh` writes a fresh result directory under `bench/results/`. This file defines the stable
-CSV schema owned by W3-01; W3-02's plotting tools consume it and must not redefine it. Result
-directories are ignored by Git.
+This contract preserves the W2-06 measured headers exactly and defines the file names and metadata consumed by W3-02.
 
-Warm-cache measurements characterize the pipeline with the input already subject to normal page
-cache behavior. They are **not disk-effect measurements**. Use the `larger` or `drop` cache modes
-only when the stated prerequisites are satisfied.
+## Producer source columns
 
-## `runs.csv`
+src/metrics.c writes one header and one data row to PREFIX.summary.csv:
 
-The first row is this exact header:
+bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s
 
-```text
-run_group,mode,status,queue_cap,workers,block_bytes,trial,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s
-```
+It writes samples to PREFIX.occupancy.csv with this exact header:
 
-Each following row is one attempted pipeline invocation. Failed attempts remain in the file.
-`input_bytes` and `cache_method` are known before an invocation and are present on successful and
-failed rows alike. `status` is `success` only when cache preparation, the command, its W2-06 summary,
-and any required trial-1 verification succeed; otherwise it is `failed`. When a metrics summary exists and can be
-parsed, available metrics may remain on a failed row; unavailable metric values are empty.
+t_ms,q1_size,q2_size
 
-| Field | Meaning and empty-field rule |
-|---|---|
-| `run_group` | `core`, `baseline`, or `memory`. |
-| `mode` | `pipeline` for core; `blocking` for baseline; `bounded` or `unbounded` for memory. |
-| `status` | `success` or `failed`. |
-| `queue_cap` | Q1/Q2 capacity for core and memory. Empty for baseline. Bounded and unbounded memory rows record the same configured positive capacity. |
-| `workers` | Worker count; baseline records `1` because it is a one-thread mode. |
-| `block_bytes` | Block size in bytes. |
-| `trial` | Trial number, 1 through 5. |
-| `input_bytes` | Input file size in bytes, including on failed rows. |
-| `cache_method` | `warm`, `larger`, or `drop`, including on failed rows. |
-| `out_rate_mb_s` | Positive output throttle in MB/s for memory rows; empty for core and baseline. |
-| `bytes`, `blocks` | W2-06 total bytes and completed blocks. |
-| `wall_s`, `throughput_mb_s` | W2-06 wall time and throughput. |
-| `lat_p50_us`, `lat_p99_us` | W2-06 latency percentiles in microseconds. |
-| `cpu_user_s`, `cpu_sys_s` | User and system CPU time from W2-06, in seconds. |
-| `peak_rss_kb` | W2-06 peak resident memory in KiB. |
-| `io_call_s` | W2-06 process I/O-call elapsed time in seconds. |
+Consumers must use these names unchanged. Summary values are decimal text. Latency cells can be empty when there were no latency samples or n/a when samples were dropped; unavailable resource and I/O fields can be n/a.
 
-Metric columns are empty when unavailable. A missing or malformed `PREFIX.summary.csv` makes that
-trial fail; it never gets silently treated as a successful zero-valued result.
+## Result files
 
-## `medians.csv`
+All files are written in the fresh result directory.
 
-The first row is this exact header:
+### trials.csv
 
-```text
-run_group,mode,queue_cap,workers,block_bytes,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s
-```
+Contains one row for each attempted core or blocking-baseline invocation, including failed attempts. Exact ordered header:
 
-There is one row per complete configuration group, containing the median of each available scalar
-metric over five successful trials. A group is keyed by `run_group`, `mode`, `queue_cap`, `workers`,
-`block_bytes`, `input_bytes`, `cache_method`, and `out_rate_mb_s`. Groups with fewer than five
-successful trials have no median row. `status` and `trial` are omitted because a median row
-summarizes a complete group rather than one attempt.
+bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s,run_group,mode,status,queue_cap,workers,block_bytes,input_bytes,cache_method,trial,out_rate_mb_s
 
-For both CSVs, valid group/mode pairs are:
+run_group is core or baseline. mode is pipeline or blocking. status is success or failed. queue_cap is populated for core and empty for baseline. workers is 1, 2, 4, or 8 for core and 1 for baseline. block_bytes is a byte count. input_bytes is the effective input prefix length. cache_method is warm, larger, drop, or wsl-no-drop. trial is 1..RUNS. out_rate_mb_s is empty outside memory runs. Failed rows keep the known metadata and have empty measured fields.
 
-| `run_group` | `mode` | `queue_cap` |
-|---|---|---|
-| `core` | `pipeline` | One of 1, 4, 16, or 64. |
-| `baseline` | `blocking` | Empty. |
-| `memory` | `bounded` or `unbounded` | The same configured capacity for both modes. |
+### medians.csv
 
-The memory comparison uses the same input, queue capacity, workers, block size, cache method, and
-positive `out_rate_mb_s` in both modes. Its pipeline flags are identical except that the unbounded
-run adds `--unbounded`.
+Contains one row for each complete core or baseline configuration group and no rows for incomplete groups. Exact ordered header:
 
-## Occupancy artifacts
+bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s,run_group,mode,queue_cap,workers,block_bytes,input_bytes,cache_method,out_rate_mb_s
 
-The sweep retains the W2-06 occupancy CSV for trial 1 of each successful core configuration as
-`occ_q<Q>_w<W>_b<B>_t1.csv`. The occupancy columns remain `t_ms,q1_size,q2_size`; other per-run
-occupancy files are scratch and are removed when the sweep exits.
+Rows use the same group/configuration values as trials.csv except status and trial. Each numeric metric median is calculated from RUNS successful values using sort -n. For odd RUNS, select the center value; for even RUNS, average the two center values. If a metric is unavailable in any successful row, its median cell is n/a (or empty only when the producer cell is empty for all rows); downstream plots that require a numeric value must fail clearly.
 
-W2-06 metric names and units are the source for the scalar columns above. If an input set or metric
-name changes, update this contract and W3-02 together through the normal team review.
+### memory_trials.csv
+
+Contains one row per bounded or unbounded memory invocation, including failed attempts. It uses the exact trials.csv header. run_group is memory; mode is bounded or unbounded. Both modes carry the same positive queue_cap, workers, block_bytes, input_bytes, cache_method, and out_rate_mb_s for a matched comparison. Pipeline flags match except the unbounded invocation adds --unbounded.
+
+### memory_medians.csv
+
+Contains one row per complete bounded or unbounded memory group and uses the exact medians.csv header. A memory point is keyed by run_group, mode, queue_cap, workers, block_bytes, input_bytes, cache_method, and out_rate_mb_s.
+
+## Occupancy artifacts retained for consumers
+
+- Core: keep trial 1 only as occ_q<Q>_w<W>_b<B>_t1.csv, such as occ_q16_w4_b65536_t1.csv. The source file is that invocation's PREFIX.occupancy.csv.
+- Memory: keep every memory invocation's exact PREFIX.occupancy.csv. Use unique prefixes containing run group, mode, queue capacity, worker count, block size, and trial; recommended basename format is metrics_memory_<mode>_q<Q>_w<W>_b<B>_t<TRIAL>.occupancy.csv.
+- Other core and baseline occupancy files may be removed after aggregation.
+
+Occupancy rows contain milliseconds from run origin and Q1/Q2 sizes. A memory occupancy file is associated with its mode and configuration through its prefix.
+
+## Group and empty-field rules
+
+- Valid group/mode pairs are core/pipeline, baseline/blocking, and memory/bounded or memory/unbounded.
+- queue_cap is empty only for baseline rows. It is positive and identical for bounded and unbounded memory rows.
+- out_rate_mb_s is empty for core and baseline, and positive for both memory modes.
+- cache_method and input_bytes are present in every raw trial row.
+- Warm-cache results are not disk-effect measurements.
+- medians.csv and memory_medians.csv contain complete groups only. Every incomplete group has no median; the sweep exits nonzero if any group is incomplete.
+- Summary column order and spelling are producer-owned and must not change in these result files.

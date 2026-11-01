@@ -1,736 +1,306 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-SWEEP="$SCRIPT_DIR/sweep.sh"
-RESULTS_ROOT="$(realpath -m -- "$SCRIPT_DIR/results")"
-
-if [[ ! -x "$SWEEP" ]]; then
-  printf 'test_sweep: expected executable %s; implement sweep.sh first\n' "$SWEEP" >&2
-  exit 1
-fi
-
-unset PIPE_CHUNK_TESTING PIPE_CHUNK_PROC_VERSION_FILE PIPE_CHUNK_VERIFY_SCRIPT
-unset PIPE_CHUNK_DROP_CACHES_FILE SWEEP_TEST_FAIL_FIRST_CORE SWEEP_TEST_UID
-unset SWEEP_TEST_SUDO_LOG SWEEP_TEST_SUDO_MODE WSL_DISTRO_NAME
-
-for tool in awk cat chmod dirname head ln mkdir mktemp realpath rm sort stat wc; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    printf 'test_sweep: required tool not found: %s\n' "$tool" >&2
-    exit 1
-  fi
-done
-
-mkdir -p -- "$RESULTS_ROOT"
-TEST_ROOT="$(mktemp -d -- "$RESULTS_ROOT/.test_sweep.XXXXXX")"
-OUTSIDE_ROOT="$(mktemp -d -- "${TMPDIR:-/tmp}/pipe-chunk-sweep-test.XXXXXX")"
-
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+SWEEP="$ROOT/bench/sweep.sh"
+RESULTS_ROOT="$ROOT/bench/results"
+TEST_ROOT=$(mktemp -d "$RESULTS_ROOT/.test-sweep.XXXXXX")
+INPUT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/w3-01-test-input.XXXXXX")
+STUB_BIN="$TEST_ROOT/pipe-chunk-stub"
+STUB_LOG="$TEST_ROOT/invocations.tsv"
+SYNC_LOG="$TEST_ROOT/sync.log"
+SUDO_LOG="$TEST_ROOT/sudo.log"
+VERIFY_LOG="$TEST_ROOT/verify.log"
+INPUT="$INPUT_ROOT/input.bin"
+LARGE_INPUT="$INPUT_ROOT/input-1g.bin"
+FIXTURE_DIR="$TEST_ROOT/fixtures"
+symlink_escape=
+mkdir -p "$FIXTURE_DIR" "$TEST_ROOT/bin"
 cleanup() {
-  rm -rf -- "$TEST_ROOT" "$OUTSIDE_ROOT"
+  [[ -z "$symlink_escape" ]] || rm -f -- "$symlink_escape"
+  rm -rf -- "$TEST_ROOT" "$INPUT_ROOT"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-INPUT="$TEST_ROOT/input.fixture"
-STUB="$TEST_ROOT/stub-pipe-chunk"
-printf 'fixture input\n' >"$INPUT"
+fail() { printf 'test_sweep: %s\n' "$*" >&2; exit 1; }
+assert_eq() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', got '$1')"; }
+assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3 (missing '$2')"; }
+assert_file() { [[ -f "$1" ]] || fail "missing file: $1"; }
 
-cat >"$STUB" <<'STUB'
+cat >"$STUB_BIN" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-: "${SWEEP_TEST_DIR:?}"
-: "${SWEEP_TEST_LOG:?}"
-
-mode=pipeline
-queue=none
-workers=none
-block=none
-rate=none
-unbounded=no
-prefix=
-manifest=none
-for ((i = 1; i <= $#; i++)); do
-  arg="${!i}"
+prefix= mode= queue= workers= block= rate= manifest= unbounded=0
+for arg in "$@"; do
   case "$arg" in
-    --mode=*) mode="${arg#*=}" ;;
-    --mode) j=$((i + 1)); mode="${!j}" ;;
-    --queue=*|--queue-cap=*) queue="${arg#*=}" ;;
-    --queue|--queue-cap) j=$((i + 1)); queue="${!j}" ;;
-    -q) j=$((i + 1)); queue="${!j}" ;;
-    --workers=*) workers="${arg#*=}" ;;
-    --workers|-w) j=$((i + 1)); workers="${!j}" ;;
-    --block-size=*) block="${arg#*=}" ;;
-    --block-size|-b) j=$((i + 1)); block="${!j}" ;;
-    --out-rate=*) rate="${arg#*=}" ;;
-    --out-rate) j=$((i + 1)); rate="${!j}" ;;
-    --unbounded) unbounded=yes ;;
-    --metrics=*) prefix="${arg#*=}" ;;
-    --metrics) j=$((i + 1)); prefix="${!j}" ;;
-    --manifest=*) manifest="${arg#*=}" ;;
-    --manifest) j=$((i + 1)); manifest="${!j}" ;;
+    --metrics=*) prefix=${arg#--metrics=} ;;
+    --mode=*) mode=${arg#--mode=} ;;
+    --queue=*) queue=${arg#--queue=} ;;
+    --workers=*) workers=${arg#--workers=} ;;
+    --block-size=*) block=${arg#--block-size=} ;;
+    --out-rate=*) rate=${arg#--out-rate=} ;;
+    --manifest=*) manifest=${arg#--manifest=} ;;
+    --unbounded) unbounded=1 ;;
   esac
 done
-
-if [[ "$mode" == blocking ]]; then
-  group=baseline
-elif [[ "$rate" != none ]]; then
-  group=memory
-else
-  group=core
-fi
-if [[ "$group" == memory && "${SWEEP_TEST_TRACE_MEMORY:-0}" == 1 &&
-      ! -e "$SWEEP_TEST_DIR/first-memory-marker" ]]; then
-  printf 'stub: first memory invocation\n' >&2
-  : >"$SWEEP_TEST_DIR/first-memory-marker"
-fi
-key="${group}_${mode}_${queue}_${workers}_${block}_${rate}_${unbounded}"
-key="${key//[^a-zA-Z0-9_.-]/_}"
-mkdir -p -- "$SWEEP_TEST_DIR/counters"
-counter="$SWEEP_TEST_DIR/counters/$key"
-count=0
-if [[ -f "$counter" ]]; then
-  read -r count <"$counter"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" >"$counter"
-printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$group" "$mode" "$queue" "$workers" "$block" "$rate" "$unbounded" "$count" >>"$SWEEP_TEST_LOG"
-printf '%s\n' "$manifest" >>"$SWEEP_TEST_DIR/manifest-args.log"
-
-if [[ "${SWEEP_TEST_FAIL_FIRST_CORE:-0}" == 1 && "$group" == core && "$queue" == 1 && "$workers" == 1 && "$block" == 4096 && "$count" == 1 ]]; then
-  exit 19
-fi
-
-if [[ -z "$prefix" ]]; then
-  printf 'stub: sweep did not provide a metrics prefix\n' >&2
-  exit 20
-fi
-mkdir -p -- "$(dirname -- "$prefix")"
-if [[ -e "$prefix.summary.csv" || -e "$prefix.occupancy.csv" ]]; then
-  printf 'stub: metrics prefix was reused: %s\n' "$prefix" >&2
-  exit 21
-fi
-printf '%s\n' "$prefix" >>"$SWEEP_TEST_DIR/prefixes.log"
-
-# Most configurations receive 10, 20, 30, 40, 50 across trials. The first
-# core, baseline, and bounded-memory groups use intentionally unsorted samples
-# whose numeric and lexical medians differ, so median selection is pinned.
-value=$((count * 10))
-lat_p50=$((value * 2))
-peak_rss=64
-if [[ "$count" -ge 1 && "$count" -le 5 ]] && {
-  [[ "$group" == core && "$mode" == pipeline && "$queue" == 1 && "$workers" == 1 && "$block" == 4096 && "$rate" == none && "$unbounded" == no ]] ||
-  [[ "$group" == baseline && "$mode" == blocking && "$block" == 4096 ]] ||
-  [[ "$group" == memory && "$mode" == pipeline && "$queue" == 4 && "$workers" == 4 && "$block" == 65536 && "$rate" == 10 && "$unbounded" == no ]]
-}; then
-  case "$count" in
-    1) value=9;   lat_p50=900;   peak_rss=90 ;;
-    2) value=10;  lat_p50=1000;  peak_rss=100 ;;
-    3) value=100; lat_p50=10000; peak_rss=1000 ;;
-    4) value=2;   lat_p50=200;   peak_rss=20 ;;
-    5) value=30;  lat_p50=3000;  peak_rss=300 ;;
-  esac
-fi
-printf '%s\n' 'throughput_mb_s,io_call_s,bytes,lat_p99_us,blocks,wall_s,peak_rss_kb,lat_p50_us,cpu_sys_s,cpu_user_s' >"$prefix.summary.csv"
-printf '%s\n' "$value,0.3,1000,$((value * 3)),10,1,$peak_rss,$lat_p50,0.2,0.1" >>"$prefix.summary.csv"
-printf '%s\n' 't_ms,q1_size,q2_size' '0,0,0' '10,1,1' >"$prefix.occupancy.csv"
+[[ -n "$prefix" ]] || { echo 'missing metrics prefix' >&2; exit 90; }
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$prefix" "$mode" "$queue" "$workers" "$block" "$rate" "$unbounded" "$manifest" >>"$STUB_LOG"
+printf 'STUB_RUN %s\n' "$prefix"
+if [[ -n ${STUB_FAIL_PREFIX:-} && "$prefix" == *"$STUB_FAIL_PREFIX"* ]]; then exit 17; fi
+trial=${prefix##*_t}
+trial=${trial%%.*}
+case "$trial" in ''|*[!0-9]*) trial=1 ;; esac
+values=(9 10 100 2 30)
+value=${values[$(((trial - 1) % 5))]}
+mkdir -p "$(dirname -- "$prefix")"
+cat >"$prefix.summary.csv" <<'CSV'
+bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s
+100000,20,1.0,VALUE,VALUE,VALUE,0.1,0.2,VALUE,0.01
+CSV
+sed -i "s/VALUE/$value/g" "$prefix.summary.csv"
+cat >"$prefix.occupancy.csv" <<'CSV'
+t_ms,q1_size,q2_size
+0,0,0
+10,1,2
+CSV
 STUB
-chmod +x -- "$STUB"
+chmod +x "$STUB_BIN"
+truncate -s 1073741824 "$INPUT"
+truncate -s 1073741824 "$LARGE_INPUT"
 
-RUNS_HEADER='run_group,mode,status,queue_cap,workers,block_bytes,trial,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s'
-MEDIANS_HEADER='run_group,mode,queue_cap,workers,block_bytes,input_bytes,cache_method,out_rate_mb_s,bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s'
-
-new_run_context() {
-  local name="$1"
-  SWEEP_TEST_DIR="$TEST_ROOT/$name"
-  mkdir -p -- "$SWEEP_TEST_DIR"
-  SWEEP_TEST_LOG="$SWEEP_TEST_DIR/invocations.csv"
-  : >"$SWEEP_TEST_LOG"
-  export SWEEP_TEST_DIR SWEEP_TEST_LOG
-}
-
-expect_rejected_without_invocation() {
-  local description="$1"
-  local destination="$2"
-  local before after
-  before="$(wc -l <"$SWEEP_TEST_LOG")"
-  if "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$destination"; then
-    printf 'test_sweep: expected rejection for %s\n' "$description" >&2
-    exit 1
-  fi
-  after="$(wc -l <"$SWEEP_TEST_LOG")"
-  if [[ "$before" != "$after" ]]; then
-    printf 'test_sweep: ran the executable before rejecting %s\n' "$description" >&2
-    exit 1
-  fi
-}
-
-assert_group_count() {
-  local log="$1" group="$2" expected="$3" actual
-  actual="$(awk -F, -v group="$group" '$1 == group { n++ } END { print n + 0 }' "$log")"
-  if [[ "$actual" != "$expected" ]]; then
-    printf 'test_sweep: expected %s %s invocations, got %s\n' "$expected" "$group" "$actual" >&2
-    exit 1
-  fi
-}
-
-assert_trial_major_order() {
-  local log="$1"
-  awk -F, '
-    $8 < last_trial { bad = 1 }
-    $8 > last_trial { last_trial = $8 }
-    END { exit bad }
-  ' "$log"
-}
-
-assert_baseline_flags() {
-  local log="$1"
-  awk -F, '$1 == "baseline" && ($3 != "none" || $4 != "none" || $6 != "none" || $7 != "no") { bad = 1 }
-    END { exit bad }' "$log"
-}
-
-assert_memory_flag_pairing() {
-  local log="$1"
-  awk -F, '
-    $1 == "memory" {
-      if ($2 != "pipeline" || $3 == "none" || $4 == "none" || $5 == "none" || $6 == "none") bad = 1
-      if ($7 == "no") bounded[$3 ":" $4 ":" $5 ":" $6]++
-      else if ($7 == "yes") unbounded[$3 ":" $4 ":" $5 ":" $6]++
-      else bad = 1
-    }
-    END {
-      for (key in bounded) if (bounded[key] != 5 || unbounded[key] != 5) bad = 1
-      for (key in unbounded) if (unbounded[key] != 5 || bounded[key] != 5) bad = 1
-      exit bad
-    }
-  ' "$log"
-}
-
-assert_median_metrics() {
-  local file="$1" group="$2" mode="$3" queue="$4" workers="$5" block="$6"
-  local expected_throughput="$7" expected_lat_p50="$8" expected_peak_rss="$9"
-  awk -F, -v group="$group" -v mode="$mode" -v queue="$queue" \
-    -v workers="$workers" -v block="$block" \
-    -v throughput="$expected_throughput" -v lat_p50="$expected_lat_p50" \
-    -v peak_rss="$expected_peak_rss" '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["run_group"]) == group && $(col["mode"]) == mode &&
-      $(col["queue_cap"]) == queue && $(col["workers"]) == workers &&
-      $(col["block_bytes"]) == block {
-        matches++
-        if ($(col["throughput_mb_s"]) + 0 != throughput + 0 ||
-            $(col["lat_p50_us"]) + 0 != lat_p50 + 0 ||
-            $(col["peak_rss_kb"]) + 0 != peak_rss + 0) bad = 1
-      }
-    END { exit (matches == 1 && !bad) ? 0 : 1 }
-  ' "$file"
-}
-
-assert_successful_group_count() {
-  local file="$1" group="$2" mode="$3" queue="$4" workers="$5" block="$6" expected="$7"
-  awk -F, -v group="$group" -v mode="$mode" -v queue="$queue" \
-    -v workers="$workers" -v block="$block" -v expected="$expected" '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["run_group"]) == group && $(col["mode"]) == mode &&
-      $(col["queue_cap"]) == queue && $(col["workers"]) == workers &&
-      $(col["block_bytes"]) == block && $(col["status"]) == "success" { count++ }
-    END { exit (count + 0 == expected + 0) ? 0 : 1 }
-  ' "$file"
-}
-
-assert_no_median_group() {
-  local file="$1" group="$2" mode="$3" queue="$4" workers="$5" block="$6"
-  awk -F, -v group="$group" -v mode="$mode" -v queue="$queue" \
-    -v workers="$workers" -v block="$block" '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["run_group"]) == group && $(col["mode"]) == mode &&
-      $(col["queue_cap"]) == queue && $(col["workers"]) == workers &&
-      $(col["block_bytes"]) == block { found = 1 }
-    END { exit found }
-  ' "$file"
-}
-
-assert_failed_row() {
-  local file="$1"
-  awk -F, '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["status"]) == "failed" { found = 1 }
-    END { exit !found }
-  ' "$file"
-}
-
-assert_memory_settings() {
-  local file="$1" expected_queue="$2" expected_workers="$3" expected_block="$4" expected_rate="$5"
-  awk -F, -v q="$expected_queue" -v w="$expected_workers" -v b="$expected_block" -v r="$expected_rate" '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["run_group"]) == "memory" && $(col["status"]) == "success" {
-      if ($(col["workers"]) != w || $(col["block_bytes"]) != b || $(col["out_rate_mb_s"]) != r) bad = 1
-      if ($(col["mode"]) == "bounded") bounded++
-      else if ($(col["mode"]) == "unbounded") unbounded++
-      else bad = 1
-      if ($(col["queue_cap"]) != q) bad = 1
-      n++
-    }
-    END { exit (n == 10 && bounded == 5 && unbounded == 5 && !bad) ? 0 : 1 }
-  ' "$file"
-}
-
-assert_memory_estimate() {
-  local log="$1" input_bytes="$2" rate="$3" expected_duration="$4"
-  awk -v input_bytes="$input_bytes" -v rate="$rate" -v expected_duration="$expected_duration" '
-    /^sweep: memory-series estimated duration:/ {
-      estimates++
-      estimate_line = NR
-      if (index($0, "~" expected_duration) &&
-          index($0, "10 runs; input_bytes=" input_bytes " each") &&
-          index($0, "output_rate=" rate " MB/s decimal") &&
-          index($0, "assumes output-bound runs") &&
-          index($0, "excludes setup/teardown overhead")) valid = 1
-    }
-    /^stub: first memory invocation$/ { first_memory_line = NR }
-    END { exit !(estimates == 1 && valid && first_memory_line > estimate_line) }
-  ' "$log"
-}
-
-assert_run_metadata() {
-  local file="$1" expected_cache="$2" expected_bytes
-  expected_bytes="$(stat -c '%s' -- "$INPUT")"
-  awk -F, -v expected_cache="$expected_cache" -v expected_bytes="$expected_bytes" '
-    NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
-    $(col["input_bytes"]) != expected_bytes || $(col["cache_method"]) != expected_cache { bad = 1 }
-    END { exit (NR > 1 && !bad) ? 0 : 1 }
-  ' "$file"
-}
-
-assert_successful_verifier_scope() {
-  local dir="$1" verify_log="$2" line_number=0 manifest_arg output_path manifest_path
-  [[ "$(wc -l <"$verify_log")" == 48 ]] || {
-    printf 'test_sweep: expected 48 successful verifier calls\n' >&2
-    return 1
-  }
-  awk -F, 'NR <= 48 && ($1 != "core" || $8 != 1) { bad = 1 } END { exit bad }' "$SWEEP_TEST_LOG" || {
-    printf 'test_sweep: trial-major prefix did not contain the 48 core trial-1 runs\n' >&2
-    return 1
-  }
-  while IFS=, read -r _ output_path manifest_path; do
-    line_number=$((line_number + 1))
-    [[ "${output_path##*/}" == "output_$(printf '%04d' "$line_number")" ]] || return 1
-    [[ "$manifest_path" == "$output_path.manifest" ]] || return 1
-  done <"$verify_log"
-  [[ "$(wc -l <"$dir/manifest-args.log")" == 265 ]] || return 1
-  line_number=0
-  while IFS= read -r manifest_arg; do
-    line_number=$((line_number + 1))
-    if (( line_number <= 48 )); then
-      [[ "${manifest_arg##*/}" == "output_$(printf '%04d' "$line_number").manifest" ]] || return 1
-    else
-      [[ "$manifest_arg" == none ]] || return 1
-    fi
-  done <"$dir/manifest-args.log"
-}
-
-assert_path_rejections() {
-  local empty_dir="$TEST_ROOT/existing-empty"
-  local full_dir="$TEST_ROOT/existing-nonempty"
-  local outside="$OUTSIDE_ROOT/outside-result"
-  local traversal="$SCRIPT_DIR/results/../.test-sweep-escape-$$"
-  local symlink="$TEST_ROOT/symlink-escape/new-result"
-
-  mkdir -- "$empty_dir" "$full_dir"
-  printf 'preserve me\n' >"$full_dir/sentinel"
-  ln -s -- "$OUTSIDE_ROOT" "$TEST_ROOT/symlink-escape"
-
-  expect_rejected_without_invocation 'existing empty directory' "$empty_dir"
-  expect_rejected_without_invocation 'existing non-empty directory' "$full_dir"
-  [[ -f "$full_dir/sentinel" ]] || { printf 'test_sweep: existing content was changed\n' >&2; exit 1; }
-  expect_rejected_without_invocation 'outside results root' "$outside"
-  expect_rejected_without_invocation '.. traversal escape' "$traversal"
-  expect_rejected_without_invocation 'symlink escape' "$symlink"
-  [[ ! -e "$outside" && ! -e "$traversal" && ! -e "$symlink" ]] || {
-    printf 'test_sweep: a rejected destination was created\n' >&2
-    exit 1
-  }
-}
-
-new_run_context path-checks
-assert_path_rejections
-
-VERIFY_SUCCESS="$TEST_ROOT/successful-verify"
-cat >"$VERIFY_SUCCESS" <<'VERIFY'
+cat >"$TEST_ROOT/bin/sync" <<'SYNC'
+#!/usr/bin/env bash
+printf 'sync\n' >>"$SYNC_LOG"
+[[ ${SYNC_FAIL:-0} != 1 ]]
+SYNC
+cat >"$TEST_ROOT/bin/sudo" <<'SUDO'
 #!/usr/bin/env bash
 set -euo pipefail
-: "${SWEEP_TEST_DIR:?}"
-printf '%s,%s,%s\n' "$1" "$2" "$3" >>"$SWEEP_TEST_DIR/verify.log"
-VERIFY
-chmod +x -- "$VERIFY_SUCCESS"
-
-new_run_context default
-ACCEPTED_DIR="$TEST_ROOT/new-parent/accepted-run"
-if ! SWEEP_TEST_TRACE_MEMORY=1 PIPE_CHUNK_TESTING=1 PIPE_CHUNK_VERIFY_SCRIPT="$VERIFY_SUCCESS" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$ACCEPTED_DIR" --verify \
-  >"$SWEEP_TEST_DIR/sweep.log" 2>&1; then
-  cat -- "$SWEEP_TEST_DIR/sweep.log" >&2
-  printf 'test_sweep: nonexistent in-tree --out-dir was not accepted\n' >&2
-  exit 1
-fi
-[[ -d "$ACCEPTED_DIR" ]] || { printf 'test_sweep: accepted result directory was not created\n' >&2; exit 1; }
-
-[[ "$(head -n 1 "$ACCEPTED_DIR/runs.csv")" == "$RUNS_HEADER" ]] || {
-  printf 'test_sweep: runs.csv header does not match the W3-01 schema\n' >&2
-  exit 1
-}
-[[ "$(head -n 1 "$ACCEPTED_DIR/medians.csv")" == "$MEDIANS_HEADER" ]] || {
-  printf 'test_sweep: medians.csv header does not match the W3-01 schema\n' >&2
-  exit 1
-}
-assert_group_count "$SWEEP_TEST_LOG" core 240
-assert_group_count "$SWEEP_TEST_LOG" baseline 15
-assert_group_count "$SWEEP_TEST_LOG" memory 10
-assert_trial_major_order "$SWEEP_TEST_LOG" || {
-  printf 'test_sweep: invocations were not ordered trial-major\n' >&2
-  exit 1
-}
-assert_baseline_flags "$SWEEP_TEST_LOG" || {
-  printf 'test_sweep: baseline received queue, worker, rate, or unbounded flags\n' >&2
-  exit 1
-}
-assert_memory_flag_pairing "$SWEEP_TEST_LOG" || {
-  printf 'test_sweep: bounded/unbounded runs did not use matching flags except --unbounded\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$ACCEPTED_DIR/runs.csv")" == 266 ]] || {
-  printf 'test_sweep: runs.csv does not contain one row per attempt\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$ACCEPTED_DIR/medians.csv")" == 54 ]] || {
-  printf 'test_sweep: medians.csv does not contain all 53 complete groups\n' >&2
-  exit 1
-}
-assert_median_metrics "$ACCEPTED_DIR/medians.csv" core pipeline 1 1 4096 10 1000 100 || {
-  printf 'test_sweep: exact numeric medians for the first core group were incorrect\n' >&2
-  exit 1
-}
-assert_median_metrics "$ACCEPTED_DIR/medians.csv" baseline blocking '' 1 4096 10 1000 100 || {
-  printf 'test_sweep: exact numeric medians for the first baseline group were incorrect\n' >&2
-  exit 1
-}
-assert_median_metrics "$ACCEPTED_DIR/medians.csv" memory bounded 4 4 65536 10 1000 100 || {
-  printf 'test_sweep: exact numeric medians for the bounded memory group were incorrect\n' >&2
-  exit 1
-}
-assert_median_metrics "$ACCEPTED_DIR/medians.csv" memory unbounded 4 4 65536 30 60 64 || {
-  printf 'test_sweep: fixture median for the unbounded memory group was incorrect\n' >&2
-  exit 1
-}
-assert_memory_settings "$ACCEPTED_DIR/runs.csv" 4 4 65536 10 || {
-  printf 'test_sweep: memory comparison defaults were not recorded correctly\n' >&2
-  exit 1
-}
-assert_memory_estimate "$SWEEP_TEST_DIR/sweep.log" "$(stat -c '%s' -- "$INPUT")" 10 00:00:01 || {
-  printf 'test_sweep: duration estimate was missing, inaccurate, repeated, or after the first memory invocation\n' >&2
-  exit 1
-}
-assert_run_metadata "$ACCEPTED_DIR/runs.csv" warm || {
-  printf 'test_sweep: input_bytes or cache_method was wrong on a run row\n' >&2
-  exit 1
-}
-assert_successful_verifier_scope "$SWEEP_TEST_DIR" "$SWEEP_TEST_DIR/verify.log" || {
-  printf 'test_sweep: successful verifier calls did not match the trial-1 core scope\n' >&2
-  exit 1
-}
-[[ "$(sort -u "$SWEEP_TEST_DIR/prefixes.log" | wc -l)" == 265 ]] || {
-  printf 'test_sweep: metrics prefixes were not unique\n' >&2
-  exit 1
-}
-shopt -s nullglob
-occupancy_files=("$ACCEPTED_DIR"/occ_q*_w*_b*_t1.csv)
-[[ "${#occupancy_files[@]}" == 48 ]] || {
-  printf 'test_sweep: expected 48 retained core trial-1 occupancy files, got %s\n' "${#occupancy_files[@]}" >&2
-  exit 1
-}
-other_occupancy_files=("$ACCEPTED_DIR"/*.occupancy.csv)
-[[ "${#other_occupancy_files[@]}" == 0 ]] || {
-  printf 'test_sweep: non-retained occupancy files remained in the result directory\n' >&2
-  exit 1
-}
-while IFS= read -r prefix; do
-  [[ ! -e "$prefix.summary.csv" && ! -e "$prefix.occupancy.csv" ]] || {
-    printf 'test_sweep: per-run metrics scratch files were not removed\n' >&2
-    exit 1
-  }
-done <"$SWEEP_TEST_DIR/prefixes.log"
-
-new_run_context override
-OVERRIDE_DIR="$TEST_ROOT/override-run"
-SUDO_BIN_DIR="$TEST_ROOT/sudo-bin"
-SUDO_STUB="$SUDO_BIN_DIR/sudo"
-mkdir -p -- "$SUDO_BIN_DIR"
-cat >"$SUDO_STUB" <<'SUDO'
-#!/usr/bin/env bash
-set -euo pipefail
-: "${SWEEP_TEST_SUDO_LOG:?}"
-printf '%s\n' "$*" >>"$SWEEP_TEST_SUDO_LOG"
-[[ "${1-}" == -n ]] || exit 2
-if [[ "${2-}" == true ]]; then
-  [[ "${SWEEP_TEST_SUDO_MODE:-success}" != deny ]]
-  exit
-fi
-if [[ "${2-}" == sh && "${3-}" == -c && "${5-}" == sh && -n "${6-}" ]]; then
-  [[ "${SWEEP_TEST_SUDO_MODE:-success}" != write-deny ]] || exit 1
-  printf '3\n' >"$6"
+printf '%s\n' "$*" >>"$SUDO_LOG"
+[[ ${SUDO_DENY:-0} != 1 ]] || exit 1
+if [[ ${1:-} == -n && ${2:-} == true ]]; then exit 0; fi
+if [[ ${1:-} == -n && ${2:-} == tee ]]; then
+  [[ ${SUDO_DROP_FAIL:-0} != 1 ]] || exit 1
+  cat >"${3:?missing drop target}"
   exit 0
 fi
-exit 3
+exit 2
 SUDO
-chmod +x -- "$SUDO_STUB"
-NATIVE_VERSION="$TEST_ROOT/proc-version-native"
-printf 'Linux version fixture without WSL marker\n' >"$NATIVE_VERSION"
-DROP_TARGET="$TEST_ROOT/drop-caches"
-printf '0\n' >"$DROP_TARGET"
-if ! PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$NATIVE_VERSION" \
-  PIPE_CHUNK_DROP_CACHES_FILE="$DROP_TARGET" SWEEP_TEST_UID=12345 \
-  SWEEP_TEST_SUDO_LOG="$SWEEP_TEST_DIR/sudo.log" SWEEP_TEST_SUDO_MODE=success \
-  PATH="$SUDO_BIN_DIR:$PATH" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=drop --out-dir "$OVERRIDE_DIR" \
-  --memory-queue 8 --memory-workers 2 --memory-block-size 4096 --out-rate 2; then
-  printf 'test_sweep: memory comparison overrides were rejected\n' >&2
-  exit 1
-fi
-assert_memory_settings "$OVERRIDE_DIR/runs.csv" 8 2 4096 2 || {
-  printf 'test_sweep: overridden memory settings were not recorded correctly\n' >&2
-  exit 1
-}
-assert_run_metadata "$OVERRIDE_DIR/runs.csv" drop || {
-  printf 'test_sweep: drop cache metadata was not recorded on every run row\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$SWEEP_TEST_DIR/sudo.log")" == 266 ]] || {
-  printf 'test_sweep: expected one sudo preflight and 265 cache-drop writes\n' >&2
-  exit 1
-}
-[[ "$(awk '$1 == "-n" && $2 == "true" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 1 ]] || {
-  printf 'test_sweep: successful sudo -n preflight was not observed\n' >&2
-  exit 1
-}
-[[ "$(awk '$1 == "-n" && $2 == "sh" && $3 == "-c" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 265 ]] || {
-  printf 'test_sweep: non-root cache-drop writes did not use sudo -n\n' >&2
-  exit 1
-}
-[[ "$(cat "$DROP_TARGET")" == 3 ]] || {
-  printf 'test_sweep: successful sudo stub did not write the temporary drop target\n' >&2
-  exit 1
-}
-
-new_run_context failure
-FAILED_GROUP_DIR="$TEST_ROOT/failure-run"
-if SWEEP_TEST_FAIL_FIRST_CORE=1 "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$FAILED_GROUP_DIR"; then
-  printf 'test_sweep: expected an incomplete group to produce a nonzero exit\n' >&2
-  exit 1
-fi
-assert_group_count "$SWEEP_TEST_LOG" core 240
-assert_group_count "$SWEEP_TEST_LOG" baseline 15
-assert_group_count "$SWEEP_TEST_LOG" memory 10
-assert_failed_row "$FAILED_GROUP_DIR/runs.csv" || {
-  printf 'test_sweep: failed attempt was not flagged in runs.csv\n' >&2
-  exit 1
-}
-assert_run_metadata "$FAILED_GROUP_DIR/runs.csv" warm || {
-  printf 'test_sweep: failed-group rows lost input_bytes or cache_method\n' >&2
-  exit 1
-}
-assert_successful_group_count "$FAILED_GROUP_DIR/runs.csv" core pipeline 1 1 4096 4 || {
-  printf 'test_sweep: incomplete core group did not have exactly four successful trials\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$FAILED_GROUP_DIR/runs.csv")" == 266 ]] || {
-  printf 'test_sweep: ordinary group failure did not preserve all attempt rows\n' >&2
-  exit 1
-}
-assert_no_median_group "$FAILED_GROUP_DIR/medians.csv" core pipeline 1 1 4096 || {
-  printf 'test_sweep: incomplete core group received a median\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$FAILED_GROUP_DIR/medians.csv")" == 53 ]] || {
-  printf 'test_sweep: complete groups did not receive their medians after a group failure\n' >&2
-  exit 1
-}
-
-VERIFY_STUB="$TEST_ROOT/failing-verify"
-cat >"$VERIFY_STUB" <<'VERIFY'
+cat >"$TEST_ROOT/verify-ok" <<'VERIFY'
 #!/usr/bin/env bash
-set -euo pipefail
-count=0
-if [[ -f "$SWEEP_TEST_DIR/verify-count" ]]; then
-  read -r count <"$SWEEP_TEST_DIR/verify-count"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" >"$SWEEP_TEST_DIR/verify-count"
-[[ "$count" != 2 ]]
+printf '%s\t%s\t%s\n' "${1:-}" "${2:-}" "${3:-}" >>"$VERIFY_LOG"
+printf 'VERIFY OK\n'
 VERIFY
-chmod +x -- "$VERIFY_STUB"
-new_run_context verify
-VERIFY_DIR="$TEST_ROOT/verify-run"
-if PIPE_CHUNK_TESTING=1 PIPE_CHUNK_VERIFY_SCRIPT="$VERIFY_STUB" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=warm --out-dir "$VERIFY_DIR" --verify; then
-  printf 'test_sweep: expected trial-1 verification failure to abort nonzero\n' >&2
-  exit 1
-fi
-[[ "$(wc -l <"$SWEEP_TEST_LOG")" == 2 ]] || {
-  printf 'test_sweep: verification failure did not abort immediately\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$VERIFY_DIR/runs.csv")" == 3 ]] || {
-  printf 'test_sweep: result rows written before verification failure were not preserved\n' >&2
-  exit 1
-}
-assert_failed_row "$VERIFY_DIR/runs.csv" || {
-  printf 'test_sweep: verification failure row was not preserved\n' >&2
-  exit 1
-}
-assert_run_metadata "$VERIFY_DIR/runs.csv" warm || {
-  printf 'test_sweep: verification failure rows lost input_bytes or cache_method\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$VERIFY_DIR/medians.csv")" == 1 ]] || {
-  printf 'test_sweep: incomplete verification-aborted sweep emitted medians\n' >&2
-  exit 1
-}
-
-new_run_context wsl
-WSL_VERSION="$TEST_ROOT/proc-version-wsl"
-printf 'Linux version fixture with MiCrOsOfT marker\n' >"$WSL_VERSION"
-WSL_DIR="$TEST_ROOT/wsl-run"
-if WSL_MESSAGE="$(PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$WSL_VERSION" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=drop --out-dir "$WSL_DIR" 2>&1)"; then
-  printf 'test_sweep: expected drop mode to be refused under simulated WSL\n' >&2
-  exit 1
-fi
-if [[ "${WSL_MESSAGE,,}" != *wsl* ]]; then
-  printf 'test_sweep: WSL refusal did not explain the platform restriction\n' >&2
-  exit 1
-fi
-[[ "$(wc -l <"$SWEEP_TEST_LOG")" == 0 && ! -e "$WSL_DIR" ]] || {
-  printf 'test_sweep: WSL cache-drop refusal launched a run or created a result directory\n' >&2
-  exit 1
-}
-
-new_run_context wsl-distro-name
-WSL_ENV_DIR="$TEST_ROOT/wsl-env-run"
-if WSL_ENV_MESSAGE="$(PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$NATIVE_VERSION" \
-  WSL_DISTRO_NAME=Ubuntu-24.04 "$SWEEP" --bin "$STUB" --input "$INPUT" \
-  --cache=drop --out-dir "$WSL_ENV_DIR" 2>&1)"; then
-  printf 'test_sweep: expected WSL_DISTRO_NAME to refuse drop mode\n' >&2
-  exit 1
-fi
-[[ "${WSL_ENV_MESSAGE,,}" == *wsl* && "$(wc -l <"$SWEEP_TEST_LOG")" == 0 && ! -e "$WSL_ENV_DIR" ]] || {
-  printf 'test_sweep: WSL_DISTRO_NAME refusal was not clear or ran a trial\n' >&2
-  exit 1
-}
-
-new_run_context larger
-LARGER_DIR="$TEST_ROOT/larger-input-run"
-if "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=larger --out-dir "$LARGER_DIR"; then
-  printf 'test_sweep: expected a small input to be refused for --cache=larger\n' >&2
-  exit 1
-fi
-[[ "$(wc -l <"$SWEEP_TEST_LOG")" == 0 && ! -e "$LARGER_DIR" ]] || {
-  printf 'test_sweep: --cache=larger launched a run or created a result directory\n' >&2
-  exit 1
-}
-
-new_run_context unreadable-proc-version
-UNREADABLE_DIR="$TEST_ROOT/unreadable-proc-version-run"
-if UNREADABLE_MESSAGE="$(PIPE_CHUNK_TESTING=1 \
-  PIPE_CHUNK_PROC_VERSION_FILE="$TEST_ROOT/no-such-proc-version" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=drop --out-dir "$UNREADABLE_DIR" 2>&1)"; then
-  printf 'test_sweep: expected an unreadable proc-version path to refuse drop mode\n' >&2
-  exit 1
-fi
-[[ "${UNREADABLE_MESSAGE,,}" == *proc-version* && "$(wc -l <"$SWEEP_TEST_LOG")" == 0 && ! -e "$UNREADABLE_DIR" ]] || {
-  printf 'test_sweep: unreadable proc-version refusal was not clear or ran a trial\n' >&2
-  exit 1
-}
-
-new_run_context denied-sudo
-DENIED_DIR="$TEST_ROOT/denied-sudo-run"
-DENIED_SUDO_LOG="$SWEEP_TEST_DIR/sudo.log"
-if DENIED_MESSAGE="$(PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$NATIVE_VERSION" \
-  PIPE_CHUNK_DROP_CACHES_FILE="$DROP_TARGET" SWEEP_TEST_UID=12345 \
-  SWEEP_TEST_SUDO_LOG="$DENIED_SUDO_LOG" SWEEP_TEST_SUDO_MODE=deny \
-  PATH="$SUDO_BIN_DIR:$PATH" "$SWEEP" --bin "$STUB" --input "$INPUT" \
-  --cache=drop --out-dir "$DENIED_DIR" 2>&1)"; then
-  printf 'test_sweep: expected denied sudo -n preflight to fail\n' >&2
-  exit 1
-fi
-[[ "${DENIED_MESSAGE,,}" == *sudo* && "$(wc -l <"$DENIED_SUDO_LOG")" == 1 ]] || {
-  printf 'test_sweep: denied sudo preflight was not logged or reported\n' >&2
-  exit 1
-}
-[[ "$(awk '$1 == "-n" && $2 == "true" { n++ } END { print n + 0 }' "$DENIED_SUDO_LOG")" == 1 ]] || {
-  printf 'test_sweep: denied sudo stub did not observe the sudo -n call\n' >&2
-  exit 1
-}
-[[ "$(wc -l <"$SWEEP_TEST_LOG")" == 0 && ! -e "$DENIED_DIR" ]] || {
-  printf 'test_sweep: denied sudo preflight launched a pipeline run\n' >&2
-  exit 1
-}
-
-SYNC_STUB_DIR="$TEST_ROOT/sync-failure-bin"
-mkdir -p -- "$SYNC_STUB_DIR"
-cat >"$SYNC_STUB_DIR/sync" <<'SYNC'
+cat >"$TEST_ROOT/verify-fail" <<'VERIFY'
 #!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "${1:-}" "${2:-}" "${3:-}" >>"$VERIFY_LOG"
+printf 'VERIFY FAIL\n' >&2
 exit 1
-SYNC
-chmod +x -- "$SYNC_STUB_DIR/sync"
-new_run_context failed-sync
-SYNC_DIR="$TEST_ROOT/failed-sync-run"
-if PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$NATIVE_VERSION" \
-  PIPE_CHUNK_DROP_CACHES_FILE="$DROP_TARGET" SWEEP_TEST_UID=12345 \
-  SWEEP_TEST_SUDO_LOG="$SWEEP_TEST_DIR/sudo.log" SWEEP_TEST_SUDO_MODE=success \
-  PATH="$SYNC_STUB_DIR:$SUDO_BIN_DIR:$PATH" \
-  "$SWEEP" --bin "$STUB" --input "$INPUT" --cache=drop --out-dir "$SYNC_DIR" \
-  >/dev/null 2>&1; then
-  printf 'test_sweep: expected sync failure to abort drop mode\n' >&2
-  exit 1
-fi
-[[ "$(wc -l <"$SYNC_DIR/runs.csv")" == 2 && "$(wc -l <"$SWEEP_TEST_LOG")" == 0 ]] || {
-  printf 'test_sweep: sync failure did not record one failed row before any invocation\n' >&2
-  exit 1
+VERIFY
+chmod +x "$TEST_ROOT/bin/sync" "$TEST_ROOT/bin/sudo" "$TEST_ROOT/verify-ok" "$TEST_ROOT/verify-fail"
+printf 'Linux test kernel\n' >"$FIXTURE_DIR/proc-linux"
+printf 'Linux version Microsoft WSL\n' >"$FIXTURE_DIR/proc-wsl"
+printf '3\n' >"$FIXTURE_DIR/drop-caches"
+
+export PIPE_CHUNK_TESTING=1 PIPE_CHUNK_BIN="$STUB_BIN" STUB_LOG SYNC_LOG SUDO_LOG VERIFY_LOG
+export RUNS SWEEP_TEST_UID WSL_DISTRO_NAME PIPE_CHUNK_PROC_VERSION_FILE PIPE_CHUNK_DROP_CACHES_FILE PIPE_CHUNK_VERIFY_SCRIPT
+export STUB_FAIL_PREFIX SUDO_DENY SUDO_DROP_FAIL SYNC_FAIL
+export PATH="$TEST_ROOT/bin:$PATH"
+export INPUT_SIZE=8388608
+unset RUNS SWEEP_TEST_UID WSL_DISTRO_NAME || true
+
+new_out() { printf '%s/%s' "$TEST_ROOT" "$1"; }
+run_sweep() {
+  local out=$1; shift
+  bash "$SWEEP" --bin "$PIPE_CHUNK_BIN" --input "$INPUT" --cache=warm --out-dir "$out" "$@" >"${SWEEP_CAPTURE:-/dev/null}"
 }
-assert_failed_row "$SYNC_DIR/runs.csv" || exit 1
-assert_run_metadata "$SYNC_DIR/runs.csv" drop || exit 1
-[[ "$(awk '$1 == "-n" && $2 == "true" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 1 ]] || {
-  printf 'test_sweep: sync-failure case did not pass sudo preflight before sync\n' >&2
-  exit 1
+expect_failure() {
+  local out=$1; shift
+  if run_sweep "$out" "$@" >"$TEST_ROOT/failure.out" 2>"$TEST_ROOT/failure.err"; then
+    fail "expected sweep failure for $out"
+  fi
 }
-[[ "$(awk '$1 == "-n" && $2 == "sh" && $3 == "-c" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 0 ]] || {
-  printf 'test_sweep: cache-drop write ran after sync failed\n' >&2
-  exit 1
+count_lines() { awk 'END { print NR + 0 }' "$1"; }
+assert_log_count() { assert_eq "$(count_lines "$STUB_LOG")" "$1" "$2"; }
+assert_header() {
+  local file=$1 expected=$2
+  assert_file "$file"
+  assert_eq "$(head -n 1 "$file")" "$expected" "header $file"
+}
+assert_median() {
+  local file=$1 group=$2 mode=$3 queue=$4 workers=$5 block=$6 metric=$7 expected=$8
+  awk -F, -v g="$group" -v m="$mode" -v q="$queue" -v w="$workers" -v b="$block" -v metric="$metric" -v expected="$expected" '
+    NR==1 { for(i=1;i<=NF;i++) col[$i]=i; next }
+    $(col["run_group"])==g && $(col["mode"])==m && $(col["queue_cap"])==q && $(col["workers"])==w && $(col["block_bytes"])==b {
+      if ($(col[metric]) != expected) exit 1
+      found++
+    }
+    END { if(found!=1) exit 1 }
+  ' "$file" || fail "median $metric for $group/$mode q=$queue w=$workers b=$block is not $expected"
+}
+assert_no_median() {
+  local file=$1 group=$2 mode=$3 queue=$4 workers=$5 block=$6
+  awk -F, -v g="$group" -v m="$mode" -v q="$queue" -v w="$workers" -v b="$block" '
+    NR==1 { for(i=1;i<=NF;i++) col[$i]=i; next }
+    $(col["run_group"])==g && $(col["mode"])==m && $(col["queue_cap"])==q && $(col["workers"])==w && $(col["block_bytes"])==b { found++ }
+    END { exit(found==0 ? 0 : 1) }
+  ' "$file" || fail "incomplete group unexpectedly has median: $group/$mode q=$queue w=$workers b=$block"
+}
+assert_raw_metadata() {
+  local file=$1
+  awk -F, 'NR==1 { for(i=1;i<=NF;i++) col[$i]=i; next }
+    $(col["input_bytes"])=="" || $(col["cache_method"])=="" { exit 1 }
+    END { if(NR<2) exit 1 }
+  ' "$file" || fail "raw rows missing input_bytes/cache_method: $file"
+}
+assert_unique_prefixes() {
+  local expected=$1 log=$2
+  local total unique
+  total=$(count_lines "$log")
+  unique=$(cut -f1 "$log" | sort -u | wc -l | tr -d ' ')
+  assert_eq "$total" "$expected" 'stub invocation count'
+  assert_eq "$unique" "$expected" 'metrics prefixes must be unique'
 }
 
-new_run_context failed-drop-write
-DROP_FAIL_DIR="$TEST_ROOT/failed-drop-write-run"
-if PIPE_CHUNK_TESTING=1 PIPE_CHUNK_PROC_VERSION_FILE="$NATIVE_VERSION" \
-  PIPE_CHUNK_DROP_CACHES_FILE="$DROP_TARGET" SWEEP_TEST_UID=12345 \
-  SWEEP_TEST_SUDO_LOG="$SWEEP_TEST_DIR/sudo.log" SWEEP_TEST_SUDO_MODE=write-deny \
-  PATH="$SUDO_BIN_DIR:$PATH" "$SWEEP" --bin "$STUB" --input "$INPUT" \
-  --cache=drop --out-dir "$DROP_FAIL_DIR" >/dev/null 2>&1; then
-  printf 'test_sweep: expected privileged drop-write failure to abort\n' >&2
-  exit 1
-fi
-[[ "$(wc -l <"$DROP_FAIL_DIR/runs.csv")" == 2 && "$(wc -l <"$SWEEP_TEST_LOG")" == 0 ]] || {
-  printf 'test_sweep: drop-write failure launched a pipeline run or omitted its failed row\n' >&2
-  exit 1
-}
-assert_failed_row "$DROP_FAIL_DIR/runs.csv" || exit 1
-assert_run_metadata "$DROP_FAIL_DIR/runs.csv" drop || exit 1
-[[ "$(awk '$1 == "-n" && $2 == "true" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 1 ]] || {
-  printf 'test_sweep: drop-write failure did not reach the successful sudo preflight\n' >&2
-  exit 1
-}
-[[ "$(awk '$1 == "-n" && $2 == "sh" && $3 == "-c" { n++ } END { print n + 0 }' "$SWEEP_TEST_DIR/sudo.log")" == 1 ]] || {
-  printf 'test_sweep: drop-write failure did not reach the privileged write\n' >&2
-  exit 1
-}
+TRIALS_HEADER='bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s,run_group,mode,status,queue_cap,workers,block_bytes,input_bytes,cache_method,trial,out_rate_mb_s'
+MEDIANS_HEADER='bytes,blocks,wall_s,throughput_mb_s,lat_p50_us,lat_p99_us,cpu_user_s,cpu_sys_s,peak_rss_kb,io_call_s,run_group,mode,queue_cap,workers,block_bytes,input_bytes,cache_method,out_rate_mb_s'
 
-printf 'test_sweep: output path, schema, median, cache, verifier, and failure checks passed\n'
+# Default RUNS: core + baseline + memory counts, tuple multiplicity, schema, and numeric medians.
+OUT=$(new_out default-five)
+: >"$STUB_LOG"
+run_sweep "$OUT" --out-rate=0.1
+assert_log_count 265 'default five-trial total'
+assert_unique_prefixes 265 "$STUB_LOG"
+assert_eq "$(awk -F '\t' '$1 ~ /metrics_core_/ {n++} END{print n+0}' "$STUB_LOG")" 240 'core invocation count'
+assert_eq "$(awk -F '\t' '$2=="blocking" {n++} END{print n+0}' "$STUB_LOG")" 15 'baseline invocation count'
+assert_eq "$(awk -F '\t' '$1 ~ /metrics_memory_/ {n++} END{print n+0}' "$STUB_LOG")" 10 'memory invocation count'
+awk -F '\t' '$1 ~ /metrics_core_/ { key=$3 ":" $4 ":" $5; count[key]++ } END { for(k in count) if(count[k]!=5) exit 1; if(length(count)!=48) exit 1 }' "$STUB_LOG" || fail 'core tuple trial counts'
+assert_header "$OUT/trials.csv" "$TRIALS_HEADER"
+assert_header "$OUT/medians.csv" "$MEDIANS_HEADER"
+assert_header "$OUT/memory_trials.csv" "$TRIALS_HEADER"
+assert_header "$OUT/memory_medians.csv" "$MEDIANS_HEADER"
+assert_raw_metadata "$OUT/trials.csv"
+assert_raw_metadata "$OUT/memory_trials.csv"
+assert_median "$OUT/medians.csv" core pipeline 16 1 4096 throughput_mb_s 10
+assert_median "$OUT/medians.csv" core pipeline 16 1 4096 lat_p50_us 10
+assert_median "$OUT/medians.csv" core pipeline 16 1 4096 peak_rss_kb 10
+assert_median "$OUT/medians.csv" baseline blocking '' 1 4096 throughput_mb_s 10
+assert_median "$OUT/medians.csv" baseline blocking '' 1 4096 lat_p50_us 10
+assert_median "$OUT/medians.csv" baseline blocking '' 1 4096 peak_rss_kb 10
+assert_median "$OUT/memory_medians.csv" memory bounded 4 4 65536 throughput_mb_s 10
+assert_median "$OUT/memory_medians.csv" memory bounded 4 4 65536 lat_p50_us 10
+assert_median "$OUT/memory_medians.csv" memory bounded 4 4 65536 peak_rss_kb 10
+assert_eq "$(find "$OUT" -maxdepth 1 -name 'occ_q*_w*_b*_t1.csv' | wc -l | tr -d ' ')" 48 'retained trial-one core occupancy count'
+assert_eq "$(find "$OUT" -maxdepth 1 -name 'metrics_memory_*.occupancy.csv' | wc -l | tr -d ' ')" 10 'retained memory occupancy count'
+git -C "$ROOT" check-ignore -q "$OUT/trials.csv" || fail 'bench/results output is not ignored'
+awk -F '\t' '$1 ~ /metrics_memory_(bounded|unbounded)_/ { match($1, /_t[0-9]+$/); trial=substr($1, RSTART); key=$3 ":" $4 ":" $5 ":" $6 ":" trial; u=($1 ~ /_unbounded_/); if(key in flags && flags[key]==u) exit 1; flags[key]=u; count[key]++ } END { for(k in count) if(count[k]!=2) exit 1; if(length(count)!=5) exit 1 }' "$STUB_LOG" || fail 'bounded/unbounded settings differ beyond --unbounded'
+
+# RUNS=1 matrix and memory default/override recording.
+OUT=$(new_out one-run)
+: >"$STUB_LOG"
+RUNS=1 INPUT_SIZE=67108864 run_sweep "$OUT"
+assert_log_count 53 'RUNS=1 total'
+assert_eq "$(awk -F '\t' '$1 ~ /metrics_core_/ {n++} END{print n+0}' "$STUB_LOG")" 48 'RUNS=1 core count'
+assert_eq "$(awk -F '\t' '$2=="blocking" {n++} END{print n+0}' "$STUB_LOG")" 3 'RUNS=1 baseline count'
+assert_eq "$(awk -F '\t' '$1 ~ /metrics_memory_/ {n++} END{print n+0}' "$STUB_LOG")" 2 'RUNS=1 memory count'
+assert_contains "$(cat "$OUT/memory_trials.csv")" ',4,4,65536,67108864,warm,1,10' 'memory defaults and metadata'
+
+OUT=$(new_out memory-overrides)
+: >"$STUB_LOG"
+RUNS=1 INPUT_SIZE=67108864 run_sweep "$OUT" --memory-queue=7 --memory-workers=2 --memory-block-size=4096 --out-rate=0.01
+grep -q ',7,2,4096,67108864,warm,1,0.01$' "$OUT/memory_trials.csv" || { cat "$OUT/memory_trials.csv" >&2; fail 'memory overrides not recorded'; }
+awk -F '\t' '$1 ~ /metrics_memory_/ {if($3!=7 || $4!=2 || $5!=4096 || $6!=0.01) exit 1; n++} END{if(n!=2) exit 1}' "$STUB_LOG" || fail 'memory override flags not passed'
+
+# A failed trial remains visible, incomplete group gets no median, later runs continue and exit is nonzero.
+OUT=$(new_out failed-trial)
+: >"$STUB_LOG"
+if RUNS=5 STUB_FAIL_PREFIX=core_q1_w1_b4096_t01 run_sweep "$OUT" --out-rate=0.1 >"$TEST_ROOT/failed.out" 2>"$TEST_ROOT/failed.err"; then fail 'injected failed trial returned success'; fi
+assert_log_count 265 'ordinary failure should finish sweep'
+assert_raw_metadata "$OUT/trials.csv"
+awk -F, 'NR==1 {for(i=1;i<=NF;i++) col[$i]=i; next} $(col["status"])=="failed" {failed++; for(i=1;i<=10;i++) if($i!="") exit 1} END{if(failed!=1) exit 1}' "$OUT/trials.csv" || fail 'failed row status/metrics'
+assert_no_median "$OUT/medians.csv" core pipeline 1 1 4096
+
+# Default estimate (sparse 1 GiB source) and smoke estimate occur before the first memory call.
+OUT=$(new_out estimate-default)
+: >"$STUB_LOG"
+env -u INPUT_SIZE -u RUNS bash "$SWEEP" --bin "$PIPE_CHUNK_BIN" --input "$LARGE_INPUT" --cache=warm --out-dir "$OUT" >"$TEST_ROOT/estimate-default.out"
+assert_contains "$(cat "$TEST_ROOT/estimate-default.out")" '00:17:54' 'default memory duration estimate'
+assert_contains "$(cat "$TEST_ROOT/estimate-default.out")" 'decimal MB/s' 'estimate units'
+assert_contains "$(cat "$TEST_ROOT/estimate-default.out")" 'output-bound' 'estimate assumption'
+assert_contains "$(cat "$TEST_ROOT/estimate-default.out")" 'setup/teardown' 'estimate overhead note'
+awk '/00:17:54/ { estimate=NR } /STUB_RUN .*metrics_memory_/ { memory=NR; exit } END { if(!estimate || !memory || estimate>=memory) exit 1 }' "$TEST_ROOT/estimate-default.out" || fail 'default estimate must precede first memory invocation'
+awk 'FNR==1 { if($0 ~ /memory/) memory=NR }' "$TEST_ROOT/estimate-default.out" >/dev/null
+OUT=$(new_out estimate-smoke)
+: >"$STUB_LOG"
+RUNS=1 INPUT_SIZE=67108864 SWEEP_CAPTURE="$TEST_ROOT/estimate-smoke.out" run_sweep "$OUT"
+assert_contains "$(cat "$TEST_ROOT/estimate-smoke.out")" '00:00:14' 'smoke memory duration estimate'
+assert_contains "$(cat "$TEST_ROOT/estimate-smoke.out")" 'decimal MB/s' 'smoke estimate units'
+assert_contains "$(cat "$TEST_ROOT/estimate-smoke.out")" 'output-bound' 'smoke estimate assumption'
+assert_contains "$(cat "$TEST_ROOT/estimate-smoke.out")" 'setup/teardown' 'smoke estimate overhead note'
+awk '/00:00:14/ { estimate=NR } /STUB_RUN .*metrics_memory_/ { memory=NR; exit } END { if(!estimate || !memory || estimate>=memory) exit 1 }' "$TEST_ROOT/estimate-smoke.out" || fail 'smoke estimate must precede first memory invocation'
+
+# Verifier is called only for trial-one core runs; a failed first verification aborts immediately.
+OUT=$(new_out verify-success)
+: >"$STUB_LOG"; : >"$VERIFY_LOG"
+RUNS=5 PIPE_CHUNK_VERIFY_SCRIPT="$TEST_ROOT/verify-ok" run_sweep "$OUT" --verify --out-rate=0.1
+assert_eq "$(count_lines "$VERIFY_LOG")" 48 'verifier call count'
+awk -F '\t' '$1!="" && $2 ~ /_t01/ && $3!="" {n++} END{if(n!=48) exit 1}' "$VERIFY_LOG" || fail 'verifier should receive only core trial-one input/output/manifest'
+awk -F '\t' '$1 ~ /metrics_core_.*_t01$/ {if($8=="") exit 1; n++} END{if(n!=48) exit 1}' "$STUB_LOG" || fail 'manifest flag must be present on each core trial-one invocation'
+awk -F '\t' '$1 !~ /metrics_core_.*_t01$/ && $8!="" {exit 1}' "$STUB_LOG" || fail 'manifest flag must not be passed to other invocations'
+OUT=$(new_out verify-failure)
+: >"$STUB_LOG"; : >"$VERIFY_LOG"
+if RUNS=5 PIPE_CHUNK_VERIFY_SCRIPT="$TEST_ROOT/verify-fail" run_sweep "$OUT" --verify --out-rate=0.1 >"$TEST_ROOT/vfail.out" 2>"$TEST_ROOT/vfail.err"; then fail 'verification failure did not abort'; fi
+assert_eq "$(count_lines "$VERIFY_LOG")" 1 'verify failure immediate abort'
+
+# WSL cache-drop request is labeled and performs no sync or sudo/cache write.
+OUT=$(new_out wsl-drop)
+: >"$STUB_LOG"; : >"$SYNC_LOG"; : >"$SUDO_LOG"
+RUNS=1 PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-wsl" run_sweep "$OUT" --cache=drop
+[[ ! -s "$SYNC_LOG" && ! -s "$SUDO_LOG" ]] || fail 'WSL path attempted sync or sudo'
+grep -q ',wsl-no-drop,' "$OUT/trials.csv" || fail 'WSL cache method not recorded'
+OUT=$(new_out wsl-distro-env)
+: >"$STUB_LOG"; : >"$SYNC_LOG"; : >"$SUDO_LOG"
+RUNS=1 WSL_DISTRO_NAME=Ubuntu PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-linux" run_sweep "$OUT" --cache=drop
+[[ ! -s "$SYNC_LOG" && ! -s "$SUDO_LOG" ]] || fail 'WSL_DISTRO_NAME path attempted sync or sudo'
+grep -q ',wsl-no-drop,' "$OUT/trials.csv" || fail 'WSL_DISTRO_NAME cache method not recorded'
+
+# Native drop: denied preflight, successful sudo tee to temp target, unreadable proc, sync and write failures.
+OUT=$(new_out sudo-denied)
+: >"$STUB_LOG"; : >"$SUDO_LOG"
+if RUNS=1 SWEEP_TEST_UID=1000 SUDO_DENY=1 PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-linux" PIPE_CHUNK_DROP_CACHES_FILE="$FIXTURE_DIR/drop-caches" run_sweep "$OUT" --cache=drop >"$TEST_ROOT/sdeny.out" 2>"$TEST_ROOT/sdeny.err"; then fail 'denied sudo preflight succeeded'; fi
+assert_eq "$(count_lines "$STUB_LOG")" 0 'denied sudo must stop before trials'
+grep -q -- '-n true' "$SUDO_LOG" || fail 'sudo denial path was not reached'
+OUT=$(new_out sudo-success)
+: >"$STUB_LOG"; : >"$SUDO_LOG"; printf '3\n' >"$FIXTURE_DIR/drop-caches"
+RUNS=1 SWEEP_TEST_UID=1000 PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-linux" PIPE_CHUNK_DROP_CACHES_FILE="$FIXTURE_DIR/drop-caches" run_sweep "$OUT" --cache=drop
+assert_eq "$(count_lines "$SUDO_LOG")" 55 'sudo preflight, calibration drop, and one drop per trial'
+assert_eq "$(cat "$FIXTURE_DIR/drop-caches")" 3 'sudo stub should write temporary drop target'
+OUT=$(new_out unreadable-proc)
+if RUNS=1 SWEEP_TEST_UID=1000 PIPE_CHUNK_PROC_VERSION_FILE="$TEST_ROOT/missing-proc" run_sweep "$OUT" --cache=drop >"$TEST_ROOT/proc.out" 2>"$TEST_ROOT/proc.err"; then fail 'unreadable proc version accepted'; fi
+OUT=$(new_out sync-failure)
+: >"$SYNC_LOG"
+if RUNS=1 SWEEP_TEST_UID=1000 SYNC_FAIL=1 PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-linux" PIPE_CHUNK_DROP_CACHES_FILE="$FIXTURE_DIR/drop-caches" run_sweep "$OUT" --cache=drop >"$TEST_ROOT/sync.out" 2>"$TEST_ROOT/sync.err"; then fail 'sync failure accepted'; fi
+OUT=$(new_out drop-failure)
+if RUNS=1 SWEEP_TEST_UID=1000 SUDO_DROP_FAIL=1 PIPE_CHUNK_PROC_VERSION_FILE="$FIXTURE_DIR/proc-linux" PIPE_CHUNK_DROP_CACHES_FILE="$FIXTURE_DIR/drop-caches" run_sweep "$OUT" --cache=drop >"$TEST_ROOT/drop.out" 2>"$TEST_ROOT/drop.err"; then fail 'drop failure accepted'; fi
+
+# Output path: nonexistent in-tree accepted; existing, outside-root, dot-dot, and symlink escape rejected.
+OUT=$(new_out larger-rejected)
+: >"$STUB_LOG"
+if RUNS=1 run_sweep "$OUT" --cache=larger >"$TEST_ROOT/larger.out" 2>"$TEST_ROOT/larger.err"; then fail '--cache=larger accepted input not larger than MemTotal'; fi
+assert_eq "$(count_lines "$STUB_LOG")" 0 '--cache=larger validation must precede trials'
+OUT=$(new_out accepted-child)
+: >"$STUB_LOG"
+RUNS=1 run_sweep "$OUT"
+assert_eq "$(count_lines "$STUB_LOG")" 53 'new in-tree output accepted'
+mkdir "$TEST_ROOT/existing-empty"
+expect_failure "$TEST_ROOT/existing-empty"
+mkdir "$TEST_ROOT/existing-full"; : >"$TEST_ROOT/existing-full/sentinel"
+expect_failure "$TEST_ROOT/existing-full"
+expect_failure "$ROOT/bench/outside-results"
+expect_failure "$RESULTS_ROOT/../escaped-result"
+mkdir "$INPUT_ROOT/outside-target"
+symlink_escape="$RESULTS_ROOT/.symlink-escape-$RANDOM"
+ln -s "$INPUT_ROOT/outside-target" "$symlink_escape"
+expect_failure "$symlink_escape/child"
+
+printf 'test_sweep: all checks passed\n'
