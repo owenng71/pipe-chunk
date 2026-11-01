@@ -13,7 +13,7 @@ and writes, interrupted system calls, a slow output device, a crashing worker an
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
 > rate limiting, metrics, I/O fault injection, worker-failure recovery, graceful Ctrl+C,
-> nonblocking stdin input and `mmap` input are checked in CI. The CI fault matrix and benchmarks are next. See [Roadmap](#roadmap).
+> nonblocking stdin input and `mmap` input are checked in CI, including an end-to-end fault matrix. Benchmarks are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -122,7 +122,7 @@ original flags are restored at the end. A terminal or redirected file is read as
 | `make test` | every unit test in `tests/` |
 | `make SAN=thread test` | the same under ThreadSanitizer (data races) |
 | `make SAN=address test` | the same under AddressSanitizer (memory errors and leaks) |
-| `./tests/e2e.sh [BINARY]` | end-to-end copies in both modes (100 MiB, empty, uneven sizes, many worker/queue/block settings, unbounded, slow input, stdin pipe), each checked by `verify.sh`, plus a backpressure check: with a slow writer, bounded mode must stay under 32 MB while `--unbounded` grows |
+| `./tests/e2e.sh [BINARY]` | end-to-end copies in both modes (100 MiB, empty, uneven sizes, many worker/queue/block settings, unbounded, slow input, stdin pipe, `mmap`), a fault matrix (short I/O, `EINTR`, `EAGAIN`, delays, dying workers, Ctrl+C drain and hard stop, each in several modes), each checked by `verify.sh`, plus a backpressure check: with a slow writer, bounded mode must stay under 32 MB while `--unbounded` grows |
 
 The I/O unit test replaces `read` and `pwrite` with scripted versions to force short counts,
 `EINTR`, `EAGAIN` and zero-byte writes deterministically, and also uses real signals and
@@ -165,5 +165,5 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 - [x] Worker supervisor: dead workers replaced, their block retried (`--fail-worker`)
 - [x] Nonblocking stdin pipe input (`O_NONBLOCK` + `poll()`)
 - [x] `mmap` input: zero-copy, blocks point into the mapping
-- [ ] End-to-end fault matrix in CI
+- [x] End-to-end fault matrix in CI
 - [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory
