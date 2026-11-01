@@ -206,33 +206,73 @@ static void test_unbounded_never_blocks(void)
     enum { N = 1000, SIZE = 100 };
     static record_t *r[N];
     record_t local = { 0 };
+    unsigned char other[16] = { 0 };
+    unsigned char *original_buf;
+    record_t *reused;
+    record_t *second;
+    record_t *after_foreign;
     pool_t *p = pool_create(0, SIZE);
 
     assert(p != NULL);
-    for (int i = 0; i < N; i++) {   // far past the first chunk: the pool grows instead of waiting
+    for (int i = 0; i < N; i++) {
         r[i] = pool_get(p);
-        assert(r[i] != NULL && r[i]->cap == SIZE);
+        assert(r[i] != NULL && r[i]->buf != NULL && r[i]->cap == SIZE);
+        assert(r[i]->seq == 0 && r[i]->offset == 0 && r[i]->len == 0);
+        for (size_t k = 0; k < sizeof(r[i]->sha); k++)
+            assert(r[i]->sha[k] == 0);
+        assert(r[i]->t_read_ns == 0 && r[i]->attempts == 0);
         memset(r[i]->buf, i & 0xff, SIZE);
     }
     for (int i = 0; i < N; i++) {
+        uintptr_t a = (uintptr_t)r[i]->buf;
+
+        for (int j = i + 1; j < N; j++) {
+            uintptr_t b = (uintptr_t)r[j]->buf;
+
+            assert(a < b ? b - a >= SIZE : a - b >= SIZE);
+        }
         for (int k = 0; k < SIZE; k++)
-            assert(r[i]->buf[k] == (unsigned char)(i & 0xff));   // buffers never overlap
+            assert(r[i]->buf[k] == (unsigned char)(i & 0xff));
     }
 
-    pool_put(p, r[N - 1]);
+    original_buf = r[0]->buf;
+    r[0]->seq = 17;
+    r[0]->offset = 4096;
+    r[0]->len = 23;
+    memset(r[0]->sha, 0xa5, sizeof(r[0]->sha));
+    r[0]->t_read_ns = 123456;
+    r[0]->attempts = 2;
+    r[0]->buf = other;
+    r[0]->cap = sizeof(other);
+
+    pool_put(p, r[0]);
     errno = 0;
-    pool_put(p, r[N - 1]);   // double put
+    pool_put(p, r[0]);
     assert(errno == EINVAL);
+    reused = pool_get(p);
+    assert(reused == r[0]);
+    assert(reused->buf == original_buf && reused->cap == SIZE);
+    assert(reused->seq == 0 && reused->offset == 0 && reused->len == 0);
+    for (size_t k = 0; k < sizeof(reused->sha); k++)
+        assert(reused->sha[k] == 0);
+    assert(reused->t_read_ns == 0 && reused->attempts == 0);
+
+    /* A rejected duplicate must not put the same tray on the free list twice. */
+    second = pool_get(p);
+    assert(second != reused);
     errno = 0;
     pool_put(p, &local);
     assert(errno == EINVAL);
-    assert(pool_get(p) == r[N - 1]);   // a returned tray is reused before growing again
+    after_foreign = pool_get(p);
+    assert(after_foreign != &local && after_foreign->buf != NULL &&
+           after_foreign->cap == SIZE);
 
     for (int i = 0; i < N / 2; i++)
         pool_put(p, r[i]);
     pool_close(p);
+    pool_put(p, r[N / 2]);   // valid returns remain accepted after close
     assert(pool_get(p) == NULL);
-    pool_destroy(p);   // half the trays still checked out: ASan's leak check covers all chunks
+    pool_destroy(p);   // checked-out trays are reclaimed through the pool's owner registry
 }
 
 static void test_destroy_with_trays_checked_out(void)
