@@ -105,6 +105,7 @@ block exactly once with no gaps or overlaps.
 | `--mode=blocking\|pipeline` | single-threaded baseline, or the concurrent pipeline (default) |
 | `--io=rw\|mmap` | read input with `read()` into pool buffers, or `mmap` it and hash and write straight from the mapping (regular files only) |
 | `--unbounded` | disable backpressure (memory-growth demonstration) |
+| `--stdin-blocking` | keep a stdin pipe blocking instead of `O_NONBLOCK` + `poll()` (for comparison) |
 | `--in-rate`, `--out-rate=MB/s` | throttle the reader or the writer |
 | `--fault-short`, `--fault-eintr`, `--fault-eagain=P` | inject short I/O, `EINTR`, `EAGAIN` with probability P |
 | `--fault-delay-us=US`, `--fail-worker=P`, `--seed=N` | extra I/O delay, worker crashes, reproducible fault runs |
@@ -112,7 +113,8 @@ block exactly once with no gaps or overlaps.
 
 `INPUT` may be `-` to read from stdin. A pipe or socket on stdin is switched to `O_NONBLOCK` for the
 run: when the producer is slow, `read` returns `EAGAIN` and the reader waits in `poll()`. The
-original flags are restored at the end. A terminal or redirected file is read as it is. Run
+original flags are restored at the end. `--stdin-blocking` leaves the pipe blocking, so `read` sleeps in
+the kernel instead. A terminal or redirected file is read as it is. Run
 `./build/pipe-chunk --help` for the full list.
 
 ## Testing

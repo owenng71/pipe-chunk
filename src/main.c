@@ -15,6 +15,7 @@ static void usage(FILE *f)
           "      --mode=blocking|pipeline\n"
           "      --io=rw|mmap\n"
           "      --unbounded            disable backpressure (memory-growth demo)\n"
+          "      --stdin-blocking       keep a stdin pipe blocking (default: O_NONBLOCK + poll)\n"
           "      --in-rate=MB/s         throttle reader\n"
           "      --out-rate=MB/s        throttle writer\n"
           "      --fault-short=P        prob. of short read/write\n"
@@ -60,7 +61,7 @@ static double parse_double(const char *opt, const char *s, double lo, double hi)
     return v;
 }
 
-enum { O_MODE = 256, O_IO, O_UNBOUNDED, O_IN_RATE, O_OUT_RATE, O_F_SHORT, O_F_EINTR,
+enum { O_MODE = 256, O_IO, O_UNBOUNDED, O_STDIN_BLOCKING, O_IN_RATE, O_OUT_RATE, O_F_SHORT, O_F_EINTR,
        O_F_EAGAIN, O_F_DELAY, O_FAIL_WORKER, O_SEED, O_MANIFEST, O_METRICS, O_HELP };
 
 int main(int argc, char **argv)
@@ -74,6 +75,7 @@ int main(int argc, char **argv)
         { "mode",           required_argument, 0, O_MODE },
         { "io",             required_argument, 0, O_IO },
         { "unbounded",      no_argument,       0, O_UNBOUNDED },
+        { "stdin-blocking", no_argument,       0, O_STDIN_BLOCKING },
         { "in-rate",        required_argument, 0, O_IN_RATE },
         { "out-rate",       required_argument, 0, O_OUT_RATE },
         { "fault-short",    required_argument, 0, O_F_SHORT },
@@ -114,6 +116,7 @@ int main(int argc, char **argv)
             else die_usage(name, optarg);
             break;
         case O_UNBOUNDED:   cfg.unbounded = true; break;
+        case O_STDIN_BLOCKING: cfg.stdin_blocking = true; break;
         case O_IN_RATE:     cfg.in_rate = parse_double(name, optarg, 0, 1e9); break;
         case O_OUT_RATE:    cfg.out_rate = parse_double(name, optarg, 0, 1e9); break;
         case O_F_SHORT:     cfg.fault_short = parse_double(name, optarg, 0, 1); break;

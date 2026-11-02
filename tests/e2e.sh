@@ -103,6 +103,8 @@ run       "pipeline, 1 MiB blocks"              10M       -b 1M
 run       "pipeline, unbounded"                 10000001  --unbounded
 run       "pipeline, slow input"                2000000   --in-rate=20
 run_stdin "pipeline, stdin pipe"                5000001   -w 4
+run_stdin "pipeline, blocking stdin pipe"       5000001   -w 4 --stdin-blocking
+run_stdin "blocking, blocking stdin pipe"       5000001   --mode=blocking --stdin-blocking
 run       "pipeline, mmap input"                104857601 --io=mmap
 run       "pipeline, mmap, empty input"         0         --io=mmap
 

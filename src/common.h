@@ -25,7 +25,7 @@ typedef enum { MODE_PIPELINE, MODE_BLOCKING } run_mode_t;
 typedef enum { IO_RW, IO_MMAP } io_kind_t;
 
 typedef struct config {
-    const char *input;           // path, or "-" for stdin (nonblocking path)
+    const char *input;           // path, or "-" for stdin (a pipe is made nonblocking)
     const char *output;
     const char *manifest;        // default OUTPUT.manifest
     const char *metrics;         // CSV prefix, NULL = no CSV
@@ -35,6 +35,7 @@ typedef struct config {
     run_mode_t  mode;
     io_kind_t   io;
     bool        unbounded;
+    bool        stdin_blocking;  // leave a stdin pipe blocking (blocking vs nonblocking comparison)
     double      in_rate, out_rate;            // MB/s, 0 = unlimited
     double      fault_short, fault_eintr, fault_eagain, fail_worker; // probabilities 0..1
     unsigned    fault_delay_us;

@@ -22,6 +22,7 @@ static bool from_stdin(const config_t *cfg)
 
 /*
  * A pipe or socket on stdin becomes nonblocking, so a slow producer shows up as EAGAIN + poll.
+ * --stdin-blocking skips this (read sleeps in the kernel instead), for comparing the two.
  * A terminal is left alone: it shares its open file description with the shell, which would stay
  * nonblocking if the hard stop's _exit skipped files_close. Regular files ignore O_NONBLOCK.
  */
@@ -89,7 +90,7 @@ int files_open(const config_t *cfg, files_t *f)
         files_report("cannot open input", cfg->input);
         goto fail;
     }
-    if (from_stdin(cfg) && make_stdin_nonblocking(f) < 0) {
+    if (from_stdin(cfg) && !cfg->stdin_blocking && make_stdin_nonblocking(f) < 0) {
         files_report("cannot make nonblocking", "stdin");
         goto fail;
     }

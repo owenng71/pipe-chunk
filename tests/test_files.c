@@ -138,6 +138,15 @@ static void test_stdin_pipe_is_nonblocking_while_open(void)
     assert(files_open(&cfg, &f) == -1);
     assert(!stdin_nonblocking());
 
+    /* --stdin-blocking: the pipe is left blocking and there is nothing to restore. */
+    cfg = make_config();
+    cfg.input = "-";
+    cfg.stdin_blocking = true;
+    assert(files_open(&cfg, &f) == 0);
+    assert(!stdin_nonblocking() && f.in_flags == -1);
+    assert(files_close(&cfg, &f, true) == 0);
+    assert(!stdin_nonblocking());
+
     restore_stdin(saved);
     close(p[1]);
 }
