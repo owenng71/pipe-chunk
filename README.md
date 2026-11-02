@@ -130,6 +130,31 @@ nonblocking pipes. CI runs the unit tests and `e2e.sh` for the plain, ThreadSani
 AddressSanitizer builds on every push. If ThreadSanitizer aborts with `unexpected memory mapping` on
 Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 
+## Benchmarks
+
+```sh
+make && ./bench/sweep.sh                                   # full sweep, about 10 minutes
+SIZE=64M RUNS=1 BLOCKS=64K ./bench/sweep.sh                # quick look
+```
+
+`bench/sweep.sh` copies a 1 GiB file with every combination of queue size {1, 4, 16, 64}, workers
+{1, 2, 4, 8} and block size {4K, 64K, 1M}, plus the blocking baseline for each block size, 5 runs
+each. Every run is checked with `verify.sh`. Runs go round-robin over the configurations so drift on
+the machine does not bias one of them. Input and output live in `/dev/shm` (RAM), so the sweep
+measures CPU and synchronization costs rather than the disk: on an SSD, flushing each 1 GiB copy
+made the same configuration vary 2–3× between runs. Set `WORK=DIR` to run on a disk instead.
+Results go to `bench/results/`:
+
+| File | Contents |
+|---|---|
+| `sweep.csv` | one row per configuration: median throughput, p50/p99 latency, CPU, peak RSS, I/O time, and min/max throughput |
+| `sweep_raw.csv` | one row per run |
+| `occupancy/*.csv` | queue sizes every 10 ms for the first run of each pipeline configuration |
+| `sweep_env.txt` | CPU, governor, kernel, compiler, commit and settings |
+
+`SIZE`, `RUNS`, `QUEUES`, `WORKERS`, `BLOCKS` and `OUT` override the defaults, e.g.
+`QUEUES="4 16" WORKERS="2 4"`.
+
 ## Repository layout
 
 | Path | Contents |
@@ -150,6 +175,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 | `tests/` | one `test_<module>.c` per module; plain `main()` with `assert` |
 | `tests/e2e.sh` | end-to-end runs of the binary, each verified |
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
+| `bench/sweep.sh` | parameter sweep: queue × workers × block size, median of 5 runs, CSV results |
 
 ## Roadmap
 

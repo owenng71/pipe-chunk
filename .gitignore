@@ -2,7 +2,7 @@ build/
 build-*/
 *.bin
 *.manifest
-bench/results/*.csv
+bench/results/
 CLAUDE.md
 
 # Local-only planning and process files (not part of the public repo)
