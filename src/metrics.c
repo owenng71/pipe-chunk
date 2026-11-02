@@ -2,7 +2,6 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +36,9 @@ struct metrics {
 
     pthread_t monitor;
     bool monitor_running;
-    atomic_bool monitor_stop;
+    pthread_mutex_t monitor_mutex;      // guards monitor_stop; exists only while the monitor runs
+    pthread_cond_t monitor_wake;        // stop signals it so the monitor does not finish its 10 ms sleep
+    bool monitor_stop;
     bq_t *q1, *q2;
     uint64_t origin_ns;
     sample_t *samples;                  // monitor-owned until it is joined
@@ -85,7 +86,6 @@ metrics_t *metrics_create(bool enabled, const char *prefix)
         errno = rc;
         return NULL;
     }
-    atomic_init(&m->monitor_stop, false);
     errno = saved_errno;
     return m;
 }
@@ -186,19 +186,25 @@ static void *monitor_main(void *arg)
 {
     metrics_t *m = arg;
     uint64_t next, now;
+    bool stop = false;
 
     if (metrics_now_ns(&next) < 0)
         return NULL;
     for (;;) {
         monitor_sample(m);   // the sample taken after stop is requested is the final one
-        if (atomic_load(&m->monitor_stop))
+        if (stop)
             break;
         next += SAMPLE_PERIOD_NS;
         if (metrics_now_ns(&now) == 0 && now > next)
             next = now;   // woke late: skip missed deadlines instead of catching up
         struct timespec until = { (time_t)(next / 1000000000u), (long)(next % 1000000000u) };
-        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL) == EINTR)
-            ;
+        int rc = 0;
+
+        pthread_mutex_lock(&m->monitor_mutex);
+        while (!m->monitor_stop && rc != ETIMEDOUT)
+            rc = pthread_cond_timedwait(&m->monitor_wake, &m->monitor_mutex, &until);
+        stop = m->monitor_stop;
+        pthread_mutex_unlock(&m->monitor_mutex);
     }
     return NULL;
 }
@@ -216,9 +222,33 @@ int metrics_monitor_start(metrics_t *m, bq_t *q1, bq_t *q2, uint64_t run_origin_
     m->q1 = q1;
     m->q2 = q2;
     m->origin_ns = run_origin_ns;
-    atomic_store(&m->monitor_stop, false);
+    m->monitor_stop = false;
+
+    pthread_condattr_t attr;
+
+    rc = pthread_condattr_init(&attr);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);   // deadlines come from metrics_now_ns
+    if (rc == 0)
+        rc = pthread_cond_init(&m->monitor_wake, &attr);
+    pthread_condattr_destroy(&attr);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    rc = pthread_mutex_init(&m->monitor_mutex, NULL);
+    if (rc != 0) {
+        pthread_cond_destroy(&m->monitor_wake);
+        errno = rc;
+        return -1;
+    }
     rc = pthread_create(&m->monitor, NULL, monitor_main, m);
     if (rc != 0) {
+        pthread_mutex_destroy(&m->monitor_mutex);
+        pthread_cond_destroy(&m->monitor_wake);
         errno = rc;
         return -1;
     }
@@ -236,12 +266,17 @@ int metrics_monitor_stop(metrics_t *m)
     }
     if (!m->monitor_running)
         return 0;
-    atomic_store(&m->monitor_stop, true);
+    pthread_mutex_lock(&m->monitor_mutex);
+    m->monitor_stop = true;
+    pthread_cond_signal(&m->monitor_wake);
+    pthread_mutex_unlock(&m->monitor_mutex);
     rc = pthread_join(m->monitor, NULL);
     if (rc != 0) {
         errno = rc;
         return -1;
     }
+    pthread_mutex_destroy(&m->monitor_mutex);
+    pthread_cond_destroy(&m->monitor_wake);
     m->monitor_running = false;
     return 0;
 }

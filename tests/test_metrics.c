@@ -192,6 +192,36 @@ static void test_no_latency_and_write_errors(void)
     bq_destroy(q);
 }
 
+/* Stop wakes the monitor instead of waiting out its 10 ms sleep, which used to add up to 10 ms to
+ * every --metrics wall time. Fastest of 5 tries, so a loaded machine does not fail the test. */
+static void test_stop_is_prompt(void)
+{
+    char prefix[128];
+    bq_t *q1 = bq_create(1), *q2 = bq_create(1);
+    uint64_t best = UINT64_MAX;
+
+    snprintf(prefix, sizeof prefix, "%s/stop", dir);
+    assert(q1 != NULL && q2 != NULL);
+    for (int i = 0; i < 5; i++) {
+        metrics_t *m = metrics_create(true, prefix);
+        uint64_t origin, t0, t1;
+
+        assert(m != NULL);
+        assert(metrics_now_ns(&origin) == 0);
+        assert(metrics_monitor_start(m, q1, q2, origin) == 0);
+        sleep_ms(1);   // the monitor has taken its first sample and is asleep
+        assert(metrics_now_ns(&t0) == 0);
+        assert(metrics_monitor_stop(m) == 0);
+        assert(metrics_now_ns(&t1) == 0);
+        if (t1 - t0 < best)
+            best = t1 - t0;
+        metrics_destroy(m);
+    }
+    assert(best < 5000000);
+    bq_destroy(q1);
+    bq_destroy(q2);
+}
+
 int main(void)
 {
     assert(mkdtemp(dir) != NULL);
@@ -199,6 +229,7 @@ int main(void)
     test_disabled_collects_nothing();
     test_enabled_full_run();
     test_no_latency_and_write_errors();
+    test_stop_is_prompt();
 
     const char *files[] = { "run.summary.csv", "run.occupancy.csv", "empty.summary.csv", "empty.occupancy.csv" };
     char path[128];
