@@ -15,7 +15,7 @@
 #
 # Output in OUT:
 #   memory_raw.csv  one row per run: mode,size,run + the --metrics summary columns
-#   memory.csv      one row per config: median peak RSS and throughput
+#   memory.csv      one row per config: medians of every metric, min/max throughput
 #   occupancy/memory_{bounded,unbounded}.csv  queue sizes every 10 ms, largest size, round 1
 set -euo pipefail
 # awk parses "0.017" as 0 under a locale with a decimal comma (e.g. LC_NUMERIC=vi_VN).
@@ -69,31 +69,6 @@ for size in $SIZES; do
     done
 done
 
-# Median peak RSS and throughput per (mode, size), in first-appearance order.
-awk -F, -v OFS=, '
-    function median(key, col,    n, i, j, t, a) {
-        n = cnt[key]
-        for (i = 1; i <= n; i++) a[i] = val[key, col, i] + 0
-        for (i = 2; i <= n; i++)
-            for (j = i; j > 1 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t }
-        return n % 2 ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
-    }
-    NR == 1 {
-        for (c = 4; c <= NF; c++) col[$c] = c
-        print "mode,size,runs,peak_rss_kb,throughput_mb_s"
-        next
-    }
-    {
-        key = $1 OFS $2
-        if (!(key in cnt)) order[++nkeys] = key
-        n = ++cnt[key]
-        val[key, "rss", n] = $col["peak_rss_kb"]
-        val[key, "tput", n] = $col["throughput_mb_s"]
-    }
-    END {
-        for (k = 1; k <= nkeys; k++)
-            print order[k], cnt[order[k]], median(order[k], "rss"), median(order[k], "tput")
-    }
-' "$raw" > "$OUT/memory.csv"
+awk -v keys=2 -f bench/median.awk "$raw" > "$OUT/memory.csv"
 
 echo "memory ok: medians in $OUT/memory.csv"

@@ -112,44 +112,6 @@ for run in $(seq 1 "$RUNS"); do
     done
 done
 
-# Medians per config, in first-appearance order. Columns 1-4 are the config key, 5 the run number;
-# the metric columns follow the summary header. A metric that is n/a in any run is n/a in the median.
-awk -F, -v OFS=, '
-    # Also sets globals lo and hi to the smallest and largest value.
-    function median(key, col,    n, i, j, t, a) {
-        n = cnt[key]; lo = hi = "n/a"
-        for (i = 1; i <= n; i++) {
-            if (val[key, col, i] == "n/a") return "n/a"
-            a[i] = val[key, col, i] + 0
-        }
-        for (i = 2; i <= n; i++)            # insertion sort; n is small
-            for (j = i; j > 1 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t }
-        lo = a[1]; hi = a[n]
-        return n % 2 ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
-    }
-    NR == 1 {
-        for (c = 6; c <= NF; c++) if ($c == "throughput_mb_s") tcol = c
-        printf "mode,queue,workers,block,runs,bytes"
-        for (c = 8; c <= NF; c++) printf ",%s", $c
-        print ",throughput_min_mb_s,throughput_max_mb_s"
-        last = NF
-        next
-    }
-    {
-        key = $1 OFS $2 OFS $3 OFS $4
-        if (!(key in cnt)) { order[++nkeys] = key; bytes[key] = $6 }
-        n = ++cnt[key]
-        for (c = 8; c <= NF; c++) val[key, c, n] = $c
-    }
-    END {
-        for (k = 1; k <= nkeys; k++) {
-            key = order[k]
-            line = key OFS cnt[key] OFS bytes[key]
-            for (c = 8; c <= last; c++) line = line OFS median(key, c)
-            median(key, tcol)
-            print line, lo, hi
-        }
-    }
-' "$raw" > "$OUT/sweep.csv"
+awk -v keys=4 -f bench/median.awk "$raw" > "$OUT/sweep.csv"
 
 echo "sweep ok: $total runs, medians in $OUT/sweep.csv"
