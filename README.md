@@ -133,8 +133,9 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 ## Benchmarks
 
 ```sh
-make && ./bench/sweep.sh                                   # full sweep, about 10 minutes
-SIZE=64M RUNS=1 BLOCKS=64K ./bench/sweep.sh                # quick look
+make && ./bench/sweep.sh            # queue x workers x block size, about 4 minutes
+./bench/memory.sh                   # bounded vs --unbounded with a slow writer, about 35 s
+./bench/plot.py                     # graphs in bench/results/plots/ (needs python3-matplotlib)
 ```
 
 `bench/sweep.sh` copies a 1 GiB file with every combination of queue size {1, 4, 16, 64}, workers
@@ -154,6 +155,11 @@ Results go to `bench/results/`:
 
 `SIZE`, `RUNS`, `QUEUES`, `WORKERS`, `BLOCKS` and `OUT` override the defaults, e.g.
 `QUEUES="4 16" WORKERS="2 4"`.
+
+`bench/memory.sh` limits the writer to 200 MB/s and copies 64–512 MiB files with `-q 4 -w 4 -b 64K`,
+bounded and `--unbounded`, 3 runs each, into `memory.csv` and `occupancy/memory_*.csv`.
+`bench/plot.py` draws throughput vs workers, latency vs queue size, queue occupancy over time
+(which stage is the bottleneck) and peak memory bounded vs unbounded.
 
 ## Repository layout
 
@@ -176,6 +182,8 @@ Results go to `bench/results/`:
 | `tests/e2e.sh` | end-to-end runs of the binary, each verified |
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
 | `bench/sweep.sh` | parameter sweep: queue × workers × block size, median of 5 runs, CSV results |
+| `bench/memory.sh` | backpressure experiment: peak memory with a slow writer, bounded vs unbounded |
+| `bench/plot.py` | graphs from the sweep and memory results |
 
 ## Roadmap
 

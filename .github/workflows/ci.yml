@@ -21,6 +21,9 @@ jobs:
       - run: make SAN=${{ matrix.san }}
       - run: make SAN=${{ matrix.san }} test
       - run: ./tests/e2e.sh build${{ matrix.san && format('-{0}', matrix.san) || '' }}/pipe-chunk
-      # Tiny sweep so bench/sweep.sh keeps working; the numbers are not used.
+      # Tiny benchmark runs and plots so the bench scripts keep working; the numbers are not used.
       - if: matrix.san == ''
-        run: SIZE=4M RUNS=2 QUEUES="1 4" WORKERS="1 2" BLOCKS="4K 64K" ./bench/sweep.sh
+        run: |
+          SIZE=4M RUNS=2 QUEUES="1 4 16" WORKERS="1 2 4" BLOCKS="4K 64K" ./bench/sweep.sh
+          SIZES="1M 2M" RUNS=1 OUT_RATE=50 ./bench/memory.sh
+          ./bench/plot.py
