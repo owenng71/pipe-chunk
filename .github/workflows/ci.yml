@@ -26,4 +26,5 @@ jobs:
         run: |
           SIZE=4M RUNS=2 QUEUES="1 4 16" WORKERS="1 2 4" BLOCKS="4K 64K" ./bench/sweep.sh
           SIZES="1M 2M" RUNS=1 OUT_RATE=50 ./bench/memory.sh
+          SIZE=8M PIPE_SIZE=4M PIPE_RATE=50 RUNS=1 ./bench/io.sh
           ./bench/plot.py

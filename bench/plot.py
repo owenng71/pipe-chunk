@@ -11,6 +11,8 @@ RESULTS defaults to bench/results. Writes PNGs to RESULTS/plots/:
                              workers: shows which stage is the bottleneck
   memory.png                 peak RSS vs file size with a slow writer, bounded vs --unbounded,
                              and buffered blocks over time for the largest file
+  io.png                     rw vs mmap with warm and cold page cache; system calls for a stdin
+                             pipe read nonblocking vs blocking, fast and slow producer
 Needs matplotlib only (Ubuntu: python3-matplotlib).
 """
 import csv
@@ -172,6 +174,53 @@ def plot_memory(results, out):
     save(fig, out, "memory.png")
 
 
+def plot_io(results, out):
+    inp, pipe = os.path.join(results, "io_input.csv"), os.path.join(results, "io_pipe.csv")
+    if not (os.path.exists(inp) and os.path.exists(pipe)):
+        print("plot: no io_input.csv / io_pipe.csv (run bench/io.sh); skipped io.png")
+        return
+    fig, (left, right) = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+
+    rows = read_csv(inp)
+    groups = [(m, io) for m in ("blocking", "pipeline") for io in ("rw", "mmap")]
+    width = 0.38
+    for i, cache in enumerate(("warm", "cold")):
+        y, err_lo, err_hi = [], [], []
+        for m, io in groups:
+            r = next(r for r in rows if (r["mode"], r["io"], r["cache"]) == (m, io, cache))
+            med = num(r["throughput_mb_s"]) / 1000
+            y.append(med)
+            err_lo.append(med - num(r["throughput_min_mb_s"]) / 1000)
+            err_hi.append(num(r["throughput_max_mb_s"]) / 1000 - med)
+        x = [g + (i - 0.5) * width for g in range(len(groups))]
+        bars = left.bar(x, y, width, yerr=[err_lo, err_hi], capsize=3, label=f"{cache} cache")
+        left.bar_label(bars, fmt="%.2f", fontsize=7, padding=2)
+    left.set_xticks(range(len(groups)), [f"{m}\n--io={io}" for m, io in groups])
+    left.set_ylabel("throughput (GB/s, median)")
+    left.set_title("Input strategy: read() vs mmap, 1 GiB from disk")
+    left.grid(alpha=0.3, axis="y")
+    left.legend()
+
+    rows = read_csv(pipe)
+    labels, ok_reads, eagain, polls = [], [], [], []
+    for r in rows:
+        labels.append(f"{r['producer']} producer\n{r['stdin']}\n{num(r['throughput_mb_s']):.0f} MB/s")
+        e = num(r["eagain"])
+        ok_reads.append(num(r["read_calls"]) - e)
+        eagain.append(e)
+        polls.append(num(r["poll_calls"]))
+    x = range(len(rows))
+    right.bar(x, ok_reads, label="read with data")
+    right.bar(x, eagain, bottom=ok_reads, label="read → EAGAIN")
+    right.bar(x, polls, bottom=[a + b for a, b in zip(ok_reads, eagain)], label="poll")
+    right.set_xticks(x, labels, fontsize=8)
+    right.set_ylabel("system calls (one strace run)")
+    right.set_title("stdin pipe: nonblocking vs blocking")
+    right.grid(alpha=0.3, axis="y")
+    right.legend(fontsize=8)
+    save(fig, out, "io.png")
+
+
 def main():
     results = sys.argv[1] if len(sys.argv) > 1 else "bench/results"
     if not os.path.exists(os.path.join(results, "sweep.csv")):
@@ -182,6 +231,7 @@ def main():
     plot_latency(results, out)
     plot_occupancy(results, out)
     plot_memory(results, out)
+    plot_io(results, out)
 
 
 if __name__ == "__main__":

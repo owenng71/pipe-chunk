@@ -137,6 +137,7 @@ Ubuntu 24.04, run `sudo sysctl vm.mmap_rnd_bits=28` once per boot.
 ```sh
 make && ./bench/sweep.sh            # queue x workers x block size, about 4 minutes
 ./bench/memory.sh                   # bounded vs --unbounded with a slow writer, about 35 s
+./bench/io.sh                       # rw vs mmap (cold/warm cache), blocking vs nonblocking pipe
 ./bench/plot.py                     # graphs in bench/results/plots/ (needs python3-matplotlib)
 ```
 
@@ -160,8 +161,14 @@ Results go to `bench/results/`:
 
 `bench/memory.sh` limits the writer to 200 MB/s and copies 64–512 MiB files with `-q 4 -w 4 -b 64K`,
 bounded and `--unbounded`, 3 runs each, into `memory.csv` and `occupancy/memory_*.csv`.
+`bench/io.sh` compares the input strategies. `--io=rw` and `--io=mmap` read a 1 GiB file from disk
+with the page cache warm and cold, in both modes; the file is dropped from the cache with
+`dd iflag=nocache` (no root needed) and `fincore` confirms the state before each run. A stdin pipe is
+read nonblocking and with `--stdin-blocking`, fed by `cat` or a producer limited to 200 MB/s; one
+extra run under `strace` counts `read`, `EAGAIN` and `poll`. Results: `io_input.csv`, `io_pipe.csv`.
+
 `bench/plot.py` draws throughput vs workers, latency vs queue size, queue occupancy over time
-(which stage is the bottleneck) and peak memory bounded vs unbounded.
+(which stage is the bottleneck), peak memory bounded vs unbounded, and the I/O comparison.
 
 ## Repository layout
 
@@ -185,7 +192,9 @@ bounded and `--unbounded`, 3 runs each, into `memory.csv` and `occupancy/memory_
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
 | `bench/sweep.sh` | parameter sweep: queue × workers × block size, median of 5 runs, CSV results |
 | `bench/memory.sh` | backpressure experiment: peak memory with a slow writer, bounded vs unbounded |
-| `bench/plot.py` | graphs from the sweep and memory results |
+| `bench/io.sh` | I/O strategies: `rw` vs `mmap` with cold and warm cache, blocking vs nonblocking pipe |
+| `bench/plot.py` | graphs from the benchmark results |
+| `bench/median.awk` | per-configuration medians, shared by the benchmark scripts |
 
 ## Roadmap
 
