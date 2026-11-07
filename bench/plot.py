@@ -13,10 +13,14 @@ RESULTS defaults to bench/results. Writes PNGs to RESULTS/plots/:
                              and buffered blocks over time for the largest file
   io.png                     rw vs mmap with warm and cold page cache; system calls for a stdin
                              pipe read nonblocking vs blocking, fast and slow producer
+  littles_law.png            measured p50 latency vs blocks in the pipeline / throughput, from
+                             the sweep's mean queue occupancy
+  inflight.png               throughput vs bytes the queues can hold (bench/inflight.sh)
 Needs matplotlib only (Ubuntu: python3-matplotlib).
 """
 import csv
 import os
+import statistics
 import sys
 
 import matplotlib
@@ -24,7 +28,7 @@ import matplotlib
 matplotlib.use("Agg")  # files only, no display needed
 import matplotlib.pyplot as plt  # noqa: E402
 
-BLOCK_LABELS = {4096: "4 KiB", 65536: "64 KiB", 1048576: "1 MiB"}
+BLOCK_LABELS = {4096: "4 KiB", 65536: "64 KiB", 262144: "256 KiB", 1048576: "1 MiB"}
 MB = 1e6  # throughput is MB/s (10^6), as printed by pipe-chunk
 
 
@@ -221,6 +225,70 @@ def plot_io(results, out):
     save(fig, out, "io.png")
 
 
+def plot_littles_law(results, out):
+    """Little's law: latency = blocks in the pipeline / blocks per second."""
+    pipe, _, blocks, _, workers = sweep_rows(results)
+    labels = {4096: "4K", 65536: "64K", 1048576: "1M"}
+    fig, ax = plt.subplots(figsize=(5.2, 4.6), constrained_layout=True)
+    lo, hi = float("inf"), 0
+    for b in blocks:
+        x, y = [], []
+        for r in pick(pipe, block=b):
+            q, w = int(r["queue"]), int(r["workers"])
+            path = os.path.join(results, "occupancy", f"pipeline_q{q}_w{w}_b{labels.get(b, b)}.csv")
+            if not os.path.exists(path):
+                continue
+            occ = read_csv(path)
+            occ = occ[1:-1] or occ  # the first and last samples are taken while the queues fill/empty
+            queued = statistics.mean(int(o["q1_size"]) + int(o["q2_size"]) for o in occ)
+            in_system = queued + w + 1  # waiting + one per busy worker + the writer's block
+            x.append(in_system * b / (num(r["throughput_mb_s"]) * MB) * 1000)
+            y.append(num(r["lat_p50_us"]) / 1000)
+        if x:
+            ax.scatter(x, y, label=f"block {block_label(b)}", s=22)
+            lo, hi = min(lo, *x, *y), max(hi, *x, *y)
+    if hi == 0:
+        plt.close(fig)
+        print("plot: no occupancy files; skipped littles_law.png")
+        return
+    ax.plot([lo, hi], [lo, hi], color="gray", linestyle="--", label="measured = predicted")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("predicted (ms): blocks in pipeline × block size ÷ throughput")
+    ax.set_ylabel("measured p50 latency (ms)")
+    ax.set_title("Little's law, every pipeline configuration")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=8)
+    save(fig, out, "littles_law.png")
+
+
+def plot_inflight(results, out):
+    base = os.path.join(results, "inflight")
+    if not os.path.isdir(base):
+        print("plot: no inflight/ results (run bench/inflight.sh); skipped inflight.png")
+        return
+    fig, ax = plt.subplots(figsize=(5.6, 4), constrained_layout=True)
+    for name in sorted(os.listdir(base), key=lambda n: int(n[:-1]) << (10 if n[-1] == "K" else 20)):
+        path = os.path.join(base, name, "sweep.csv")
+        if not os.path.exists(path):
+            continue
+        rs = sorted((r for r in read_csv(path) if r["mode"] == "pipeline"), key=lambda r: int(r["queue"]))
+        x = [2 * int(r["queue"]) * int(r["block"]) / 2**20 for r in rs]
+        y = [num(r["throughput_mb_s"]) / 1000 for r in rs]
+        ax.plot(x, y, marker="o", label=f"block {block_label(int(rs[0]['block']))}")
+    ax.axvline(24, color="gray", linestyle=":", label="L3 cache of the test CPU (24 MiB)")
+    ax.set_xscale("log", base=2)
+    ticks = sorted({v for line in ax.get_lines() for v in line.get_xdata()})
+    ax.set_xticks(ticks, [f"{t:g}" for t in ticks])
+    ax.set_xlabel("bytes the two queues can hold (MiB) = 2 × queue × block")
+    ax.set_ylabel("throughput (GB/s, median)")
+    ax.set_ylim(bottom=0)
+    ax.set_title("Throughput vs bytes in flight, 4 workers")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="lower left")
+    save(fig, out, "inflight.png")
+
+
 def main():
     results = sys.argv[1] if len(sys.argv) > 1 else "bench/results"
     if not os.path.exists(os.path.join(results, "sweep.csv")):
@@ -232,6 +300,8 @@ def main():
     plot_occupancy(results, out)
     plot_memory(results, out)
     plot_io(results, out)
+    plot_littles_law(results, out)
+    plot_inflight(results, out)
 
 
 if __name__ == "__main__":

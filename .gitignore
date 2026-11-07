@@ -4,8 +4,6 @@ build-*/
 *.manifest
 bench/results/
 CLAUDE.md
-
-# Local-only planning and process files (not part of the public repo)
 docs/
 .specify/
 specs/

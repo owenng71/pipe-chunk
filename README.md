@@ -13,7 +13,8 @@ and writes, interrupted system calls, a slow output device, a crashing worker an
 
 > **Status: in development.** The concurrent pipeline with backpressure, the blocking baseline,
 > rate limiting, metrics, I/O fault injection, worker-failure recovery, graceful Ctrl+C,
-> nonblocking stdin input and `mmap` input are checked in CI, including an end-to-end fault matrix. Benchmarks are next. See [Roadmap](#roadmap).
+> nonblocking stdin input and `mmap` input are checked in CI, including an end-to-end fault matrix. Benchmarks and their analysis are in [Results](#results).
+> See [Roadmap](#roadmap).
 
 ---
 
@@ -156,6 +157,9 @@ Results go to `bench/results/`:
 | `occupancy/*.csv` | queue sizes every 10 ms for the first run of each pipeline configuration |
 | `sweep_env.txt` | CPU, governor, kernel, compiler, commit and settings |
 
+`bench/inflight.sh` repeats the sweep for 64K, 256K and 1M blocks with queue sizes chosen so the
+queues hold the same number of bytes (2–128 MiB) for every block size.
+
 `SIZE`, `RUNS`, `QUEUES`, `WORKERS`, `BLOCKS` and `OUT` override the defaults, e.g.
 `QUEUES="4 16" WORKERS="2 4"`.
 
@@ -169,6 +173,102 @@ extra run under `strace` counts `read`, `EAGAIN` and `poll`. Results: `io_input.
 
 `bench/plot.py` draws throughput vs workers, latency vs queue size, queue occupancy over time
 (which stage is the bottleneck), peak memory bounded vs unbounded, and the I/O comparison.
+
+## Results
+
+Measured on an Intel Core i7-13620H (6 performance + 4 efficiency cores, 16 threads, 24 MiB L3
+cache), 16 GB RAM, Ubuntu 22.04, kernel 6.8, gcc 11.4, at commit `04a7d80`. A 1 GiB file, median of
+5 runs, copies in RAM (`/dev/shm`) unless stated otherwise. Other machines will give other numbers;
+the commands above regenerate everything.
+
+| Configuration (64 KiB blocks unless stated) | Throughput |
+|---|---|
+| Blocking baseline (one thread reads, hashes, writes) | 1.47 GB/s |
+| Pipeline, 1 worker | 2.15 GB/s |
+| Pipeline, 4 workers, queue 4 | 5.02 GB/s (3.4× the baseline) |
+| Best overall: 1 MiB blocks, queue 1, 4 workers | 5.58 GB/s |
+
+### Workers: faster until the writer is the bottleneck
+
+![Throughput vs worker count](bench/figures/throughput_vs_workers.png)
+
+One worker runs at 2.15 GB/s, the speed of SHA-256 on one core of this CPU (2.31 GB/s in
+`openssl speed`). It already beats the baseline because reading and writing now overlap with
+hashing. Two workers double it, four reach about 5 GB/s, and eight add nothing. The queue occupancy
+shows why: the queue in front of the slowest stage is full and the one behind it is empty.
+
+![Queue occupancy over time](bench/figures/occupancy.png)
+
+With 1 or 2 workers, Q1 is full and Q2 nearly empty: hashing is the bottleneck and backpressure keeps the
+reader waiting. From 4 workers on, both queues are full: the single writer is the bottleneck, so more
+workers cannot help. With 4 KiB blocks the pipeline peaks at 2.6–2.7 GB/s with 2 workers and then gets
+slower. A 1 GiB file is 262,144 such blocks, each handed over twice through a lock and a condition
+variable; with 8 workers the kernel time doubles (1.2 s vs 0.6 s) as threads contend for the same two
+queues.
+
+### Queue size: more waiting, not more speed
+
+![Latency vs queue size](bench/figures/latency_vs_queue.png)
+
+Once the stages are balanced, a larger queue does not raise throughput: with 64 KiB blocks and one
+worker it stays at 2.15–2.18 GB/s from queue 1 to 64, while the median latency of a block grows from
+0.09 ms to 1.98 ms. The queues stay full, so every new block waits behind all the blocks already
+queued. This is Little's law: latency = blocks in the pipeline ÷ blocks per second. Using the measured
+mean queue occupancy, it predicts the measured median latency of all 48 configurations: the median
+ratio of measured to predicted is 0.99, and 80% of configurations are within 13%:
+
+![Little's law check](bench/figures/littles_law.png)
+
+### Bytes in flight and the CPU cache
+
+![Throughput vs bytes in flight](bench/figures/inflight.png)
+
+Big queues of big blocks are also slower: 1 MiB blocks reach 5.58 GB/s with queue 1 but about
+4.0 GB/s with queue 16 or 64. The cause is the number of bytes in flight, not the block size: with
+64K, 256K or 1M blocks alike, throughput falls from 4.8–5.5 GB/s to 3.8–4.0 GB/s between 8 and
+32 MiB that the queues can hold, around the CPU's 24 MiB last-level cache. Beyond that, a block has
+left the cache by the time the next stage reads it.
+
+### Backpressure keeps memory flat
+
+![Bounded vs unbounded memory](bench/figures/memory.png)
+
+With the writer limited to 200 MB/s, the bounded pipeline peaks at 5.6–5.8 MiB for every file size
+from 64 to 512 MiB. With `--unbounded`, the reader finishes the 512 MiB file in about 0.2 s and
+memory grows to 483 MiB, nearly the whole file, then drains at the writer's pace. Both copies take
+the same time (199.8 MB/s): the extra memory buys nothing, and a block waits up to 2.5 s (p99) instead
+of 4.6 ms.
+
+### Input strategies
+
+![rw vs mmap, nonblocking vs blocking pipe](bench/figures/io.png)
+
+- **`read()` vs `mmap`, warm cache:** `mmap` saves the copy from the page cache into a buffer, which
+  helps the single-threaded baseline (1.55 vs 1.47 GB/s). The pipeline is 8% slower with `mmap`
+  (4.54 vs 4.91 GB/s): the saved copy was the reader's, which is not the bottleneck, while every
+  4 KiB page now costs a page fault in a worker. `mmap`'s peak RSS is about 1 GiB because touched
+  file pages count in RSS; they are clean page-cache pages, not allocations.
+- **Cold cache** (file dropped from the page cache before each run): the reader now waits for the
+  SSD and the pipeline runs at 1.1–1.5 GB/s, still about 1.27× the baseline because reading overlaps
+  with hashing and writing. `read()` and `mmap` are equal within 6%. The absolute cold numbers varied
+  by up to 40% between sessions on this laptop's SSD while the ratios held, so only the ratios are
+  reported.
+- **Stdin pipe:** with a fast producer the pipe is almost always full and both modes run at
+  3.6–3.7 GB/s. With a producer limited to 200 MB/s, the nonblocking reader finds the pipe empty for
+  almost every block: 16,364 `read` calls (8,164 returning `EAGAIN`) and 8,164 `poll` calls, against
+  8,200 `read` calls with `--stdin-blocking`. The speed and CPU time are the same. Nonblocking input
+  buys control, not speed: the reader is never stuck inside `read()` and could wait on several inputs
+  or a timeout.
+
+### Takeaways
+
+- Choose the worker count by the slowest stage: here hashing needs 2–4 workers before the single
+  writer becomes the limit.
+- Keep queues small. Queue 4 with 64 KiB blocks reaches the throughput plateau with 0.16 ms median
+  latency and under 6 MiB of memory; larger queues only add latency and, past the cache size,
+  lose throughput.
+- Very small blocks cost more in synchronization than in work; 64 KiB–1 MiB blocks amortize it.
+- Without backpressure, memory and latency grow with the input while throughput stays the same.
 
 ## Repository layout
 
@@ -192,6 +292,8 @@ extra run under `strace` counts `read`, `EAGAIN` and `poll`. Results: `io_input.
 | `scripts/` | `setup.sh`, `gen_input.sh`, `verify.sh` |
 | `bench/sweep.sh` | parameter sweep: queue × workers × block size, median of 5 runs, CSV results |
 | `bench/memory.sh` | backpressure experiment: peak memory with a slow writer, bounded vs unbounded |
+| `bench/inflight.sh` | throughput vs bytes the queues hold, for 64K, 256K and 1M blocks |
+| `bench/figures/` | the graphs shown in [Results](#results) |
 | `bench/io.sh` | I/O strategies: `rw` vs `mmap` with cold and warm cache, blocking vs nonblocking pipe |
 | `bench/plot.py` | graphs from the benchmark results |
 | `bench/median.awk` | per-configuration medians, shared by the benchmark scripts |
@@ -211,4 +313,5 @@ extra run under `strace` counts `read`, `EAGAIN` and `poll`. Results: `io_input.
 - [x] Nonblocking stdin pipe input (`O_NONBLOCK` + `poll()`)
 - [x] `mmap` input: zero-copy, blocks point into the mapping
 - [x] End-to-end fault matrix in CI
-- [ ] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, bounded vs unbounded memory
+- [x] Benchmarks: queue size × workers × block size, `rw` vs `mmap`, blocking vs nonblocking pipe,
+  bounded vs unbounded memory, with graphs and analysis
